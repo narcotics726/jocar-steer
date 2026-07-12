@@ -71,14 +71,24 @@ impl Ps2State {
         }
     }
 
-    /// Check if the response indicates analog mode (0x73 on byte 1).
+    /// Whether the poll carries live analog stick data.
+    ///
+    /// Byte 1 is `(mode << 4) | words`, where `words` is the number of
+    /// 16-bit data words following the 0x5A header. Analog packets carry
+    /// >=3 words (6 bytes: 2 button + 4 axis); digital (0x41) carries 1.
+    ///
+    /// This clone receiver reports `0xf3` (mode nibble 0xF = config mode)
+    /// rather than the textbook `0x73`, but still streams valid stick data,
+    /// so we accept both the analog (0x7_) and config (0xF_) mode nibbles
+    /// and simply require enough data words.
     pub fn is_analog(&self) -> bool {
-        self.raw[1] == 0x73
+        let mode = self.raw[1] & 0xF0;
+        (mode == 0x70 || mode == 0xF0) && (self.raw[1] & 0x0F) >= 3
     }
 
-    /// Check if the response indicates digital mode (0x41 on byte 1).
+    /// Check if the response indicates digital mode (mode nibble 0x4, e.g. 0x41).
     pub fn is_digital(&self) -> bool {
-        self.raw[1] == 0x41
+        self.raw[1] & 0xF0 == 0x40
     }
 
     /// Right joystick X axis (0 = left, 128 = center, 255 = right).
@@ -148,18 +158,24 @@ impl<'d> Ps2Controller<'d> {
         buf
     }
 
-    /// Enter configuration mode, then configure analog + lock mode.
+    /// Force the controller into analog mode and lock it there.
     ///
-    /// After this call, the controller's red LED should light up
-    /// and the analog sticks become active. Returns the acknowledge
-    /// responses from each step.
-    pub fn enter_analog_mode(&mut self) -> ([u8; 9], [u8; 9]) {
-        // Step 1: Enter config mode
-        // 0x01 = start, 0x43 = enter config, 0x00 = mode, 0x01 = lock analog, 0x00 = unlock
-        let ack1 = self.command(&[0x01, 0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
-        // Step 2: Exit config mode (0x44), with mode byte = 0x01 (analog lock)
-        let ack2 = self.command(&[0x01, 0x44, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
-        (ack1, ack2)
+    /// After this call the analog LED lights up and the sticks report
+    /// real values (poll byte 1 == 0x73). The mode is *locked*, so the
+    /// physical MODE button and the controller's power-saving logic can't
+    /// silently switch back to digital. Wireless pads still lose this on a
+    /// full disconnect/sleep, so the caller should also re-run this whenever
+    /// a poll comes back in digital mode (see `Ps2State::is_analog`).
+    pub fn enter_analog_mode(&mut self) {
+        // Step 1: enter config mode.
+        //   0x01 = start, 0x43 = enter/exit config, 0x01 = enter.
+        let _ = self.command(&[0x01, 0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        // Step 2: set major mode (0x44). byte[3]=0x01 => analog,
+        //   byte[4]=0x03 => LOCK (0x00 would leave it user-switchable).
+        let _ = self.command(&[0x01, 0x44, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00]);
+        // Step 3: exit config mode (0x43 with byte[3]=0x00). The trailing
+        //   0x5A bytes are the conventional filler for this command.
+        let _ = self.command(&[0x01, 0x43, 0x00, 0x00, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A]);
     }
 
     /// Read the current controller state.

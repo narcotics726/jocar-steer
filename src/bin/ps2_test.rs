@@ -5,7 +5,7 @@ use defmt::info;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
-use jocar_steer::ps2::{Button, Ps2Controller};
+use jocar_steer::ps2::Ps2Controller;
 use panic_rtt_target as _;
 
 extern crate alloc;
@@ -44,44 +44,23 @@ async fn main(_spawner: Spawner) -> ! {
     Timer::after(Duration::from_millis(500)).await;
     info!("--- PS2 Test ---");
 
+    // NOTE: intentionally does NOT call enter_analog_mode(). This is a raw
+    // probe: press MODE by hand and watch how the full packet changes so we
+    // can learn what THIS clone receiver actually reports for analog vs digital.
     loop {
         let state = ps2.read();
 
-        if state.is_analog() {
-            info!(
-                "LX:{} LY:{}  RX:{} RY:{}  |  SEL{} L3{} R3{} ST{} ^{} >{} v{} <{}  L2{} R2{} L1{} R1{} △{} ○{} ×{} □{}",
-                state.lx() as u16, state.ly() as u16,
-                state.rx() as u16, state.ry() as u16,
-                p(state, Button::Select),
-                p(state, Button::L3),
-                p(state, Button::R3),
-                p(state, Button::Start),
-                p(state, Button::Up),
-                p(state, Button::Right),
-                p(state, Button::Down),
-                p(state, Button::Left),
-                p(state, Button::L2),
-                p(state, Button::R2),
-                p(state, Button::L1),
-                p(state, Button::R1),
-                p(state, Button::Triangle),
-                p(state, Button::Circle),
-                p(state, Button::Cross),
-                p(state, Button::Square),
-            );
-        } else {
-            info!(
-                "RAW: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                state.raw[0], state.raw[1], state.raw[2],
-                state.raw[3], state.raw[4], state.raw[5],
-                state.raw[6], state.raw[7], state.raw[8],
-            );
-        }
+        // Always dump the full packet so we can see the mode byte (raw[1])
+        // regardless of what is_analog() thinks.
+        info!(
+            "b1={:02x} analog={} | RAW {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+            state.raw[1],
+            state.is_analog(),
+            state.raw[0], state.raw[1], state.raw[2],
+            state.raw[3], state.raw[4], state.raw[5],
+            state.raw[6], state.raw[7], state.raw[8],
+        );
 
-        Timer::after(Duration::from_millis(100)).await;
+        Timer::after(Duration::from_millis(200)).await;
     }
-}
-
-fn p(state: jocar_steer::ps2::Ps2State, btn: jocar_steer::ps2::Button) -> &'static str {
-    if state.pressed(btn) { "●" } else { "·" }
 }

@@ -5,20 +5,18 @@
 //! passes a desired angle in degrees — it does not need to know whether the
 //! angle came from a button pad, a PS2 analog stick, or anything else.
 //!
-//! # Future: slew-rate limiting (not yet implemented)
+//! # Slew-rate limiting
 //!
-//! If smooth ramping is ever needed (e.g. for throttle or a softer digital-steer
-//! feel), add:
+//! [`set_target`] stores the goal without writing the channel; [`update`] is
+//! called from the fixed-rate poll loop and moves an internal `current_deg`
+//! toward `target_deg` by at most `max_step` each call, then writes the channel.
 //!
-//! - `set_target(deg)` — store the goal but do **not** write the channel.
-//! - `update(max_step)` — called from a fixed-rate tick; moves an internal
-//!   `current_deg` toward `target_deg` by at most `max_step` each call, then
-//!   writes the channel.
-//!
-//! With a large enough `max_step`, `update` behaves identically to the current
-//! immediate `set_angle`. The steering servo itself is fast enough that slew-rate
-//! control is generally unnecessary — the servo responds instantly and the
-//! operator expects direct 1:1 tracking.
+//! This is not about servo speed — the SG90 tracks fine on its own. It caps how
+//! fast the *commanded* angle changes, which flattens the servo's peak current
+//! draw when the stick is slammed. On a shared 5V rail that current spike sags
+//! the supply enough to brown out the PS2 wireless receiver, so limiting it
+//! directly reduces the dropout rate. With a large enough `max_step`, `update`
+//! degrades to the immediate 1:1 tracking of [`set_angle`].
 
 use esp_hal::ledc::channel::ChannelHW;
 
@@ -57,8 +55,10 @@ pub struct Steering<Ch> {
     max_deg: i32,
     /// Run-time fine calibration (accumulated by [`adjust_trim`]).
     trim_deg: i32,
-    /// Most recent target angle passed to [`set_angle`].
+    /// Goal angle set by [`set_target`]/[`set_angle`]; `update` chases this.
     target_deg: i32,
+    /// Angle actually written to the channel; slewed toward `target_deg`.
+    current_deg: i32,
 }
 
 impl<Ch: ChannelHW> Steering<Ch> {
@@ -79,18 +79,38 @@ impl<Ch: ChannelHW> Steering<Ch> {
             max_deg,
             trim_deg: 0,
             target_deg: 0,
+            current_deg: 0,
         };
         this.apply();
         this
     }
 
-    /// Command a steering angle relative to the trimmed center.
+    /// Command a steering angle *immediately* (no slew limiting).
     ///
     /// `deg` is clamped to `[-max_deg, max_deg]` before being written to the
     /// servo. Positive = left (longer pulse), negative = right (shorter pulse).
     pub fn set_angle(&mut self, deg: i32) {
         self.target_deg = deg.clamp(-self.max_deg, self.max_deg);
+        self.current_deg = self.target_deg;
         self.apply();
+    }
+
+    /// Set the goal angle without moving the servo yet.
+    ///
+    /// `deg` is clamped to `[-max_deg, max_deg]`. Call [`update`] from the poll
+    /// loop to slew the servo toward this goal.
+    pub fn set_target(&mut self, deg: i32) {
+        self.target_deg = deg.clamp(-self.max_deg, self.max_deg);
+    }
+
+    /// Move `current_deg` toward `target_deg` by at most `max_step` degrees,
+    /// then write the channel. Call once per fixed-rate tick.
+    pub fn update(&mut self, max_step: i32) {
+        let delta = (self.target_deg - self.current_deg).clamp(-max_step, max_step);
+        if delta != 0 {
+            self.current_deg += delta;
+            self.apply();
+        }
     }
 
     /// Return the servo to the trimmed center position (equivalent to
@@ -117,8 +137,8 @@ impl<Ch: ChannelHW> Steering<Ch> {
 
     /// Compute the effective angle and write it to the LEDC channel.
     fn apply(&mut self) {
-        // effective_deg = static offset + run-time trim + target
-        let effective_deg = self.center_offset_deg + self.trim_deg + self.target_deg;
+        // effective_deg = static offset + run-time trim + slewed current angle
+        let effective_deg = self.center_offset_deg + self.trim_deg + self.current_deg;
         self.channel.set_duty_hw(angle_to_counts(effective_deg));
     }
 }

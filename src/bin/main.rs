@@ -99,7 +99,7 @@ async fn main(_spawner: Spawner) -> ! {
         })
         .unwrap();
 
-    let servo_pin = peripherals.GPIO4;
+    let servo_pin = peripherals.GPIO13;
     let mut ch = ledc.channel(channel::Number::Channel0, servo_pin);
     ch.configure(channel::config::Config {
         timer: &lstimer,
@@ -122,10 +122,39 @@ async fn main(_spawner: Spawner) -> ! {
 
     // Deadzone around stick center (±3 counts out of 127).
     const RX_DEADZONE: i32 = 3;
+    // Max steering change per ~33 ms tick. Caps the servo's peak current draw
+    // so a slammed stick doesn't sag the shared 5V rail and brown out the PS2
+    // receiver. 8°/tick × ~30 Hz ≈ 240°/s → full 60° swing in ~0.25 s.
+    const SLEW_DEG_PER_TICK: i32 = 8;
     let mut last_deg: i32 = i32::MIN;
+    let mut analog_ok = true;
 
     loop {
         let state = ps2.read();
+
+        // A power spike (servo/motor) can brown out the wireless receiver; it
+        // comes back in digital mode (byte1 nibble 0x4_) with dead sticks. Host
+        // config can't restore a wirelessly-disconnected clone pad — only its
+        // MODE button can. So we don't try to auto-recover: we FREEZE the servo
+        // (raw[5] is garbage in digital mode) and hold position until the user
+        // presses MODE. `is_analog` here is a safety gate, not a recovery path.
+        if !state.is_analog() {
+            if analog_ok {
+                info!("PS2 lost analog (byte1={:#04x}) — servo held; press MODE", state.raw[1]);
+                analog_ok = false;
+            }
+            Timer::after(Duration::from_millis(50)).await;
+            continue;
+        }
+        if !analog_ok {
+            // Restored via MODE press. The link is stable now, so re-lock analog
+            // so it can't silently toggle back to digital on its own.
+            ps2.enter_analog_mode();
+            info!("PS2 analog restored and re-locked");
+            analog_ok = true;
+            last_deg = i32::MIN;
+        }
+
         let rx = state.rx() as i32;
 
         let centered = rx - 128;
@@ -136,11 +165,12 @@ async fn main(_spawner: Spawner) -> ! {
         };
 
         if cmd != last_deg {
-            info!("angle: {}°  rx: {}", cmd, state.rx());
+            info!("target: {}°  rx: {}", cmd, state.rx());
             last_deg = cmd;
         }
 
-        steering.set_angle(cmd);
+        steering.set_target(cmd);
+        steering.update(SLEW_DEG_PER_TICK);
         Timer::after(Duration::from_millis(33)).await; // ~30 Hz
     }
 }
