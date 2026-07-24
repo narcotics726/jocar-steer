@@ -19,25 +19,16 @@ use esp_hal::ledc::{
 };
 use esp_hal::time::Rate;
 
-use jocar_steer::ps2::Ps2Controller;
+use jocar_steer::control;
+use jocar_steer::ps2::{Button, Ps2Controller, Ps2Event};
 use jocar_steer::steering::Steering;
+use jocar_steer::tb6612::Tb6612;
 use panic_rtt_target as _;
 
 extern crate alloc;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 esp_bootloader_esp_idf::esp_app_desc!();
-
-/// Map PS2 right stick X axis (0..=255, center=128) to steering degrees.
-/// 0 = full left, 128 = center, 255 = full right.
-fn rx_to_deg(rx: u8, max_deg: i32) -> i32 {
-    if rx == 128 {
-        return 0;
-    }
-    let centered = rx as i32 - 128;
-    // Scale: ±127 maps to ±max_deg
-    (centered * max_deg) / 127
-}
 
 #[allow(
     clippy::large_stack_frames,
@@ -50,18 +41,6 @@ async fn main(_spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    let _ = peripherals.GPIO27;
-    let _ = peripherals.GPIO28;
-    let _ = peripherals.GPIO29;
-    let _ = peripherals.GPIO30;
-    let _ = peripherals.GPIO31;
-    let _ = peripherals.GPIO32;
-    let _ = peripherals.GPIO33;
-    let _ = peripherals.GPIO34;
-    let _ = peripherals.GPIO35;
-    let _ = peripherals.GPIO36;
-    let _ = peripherals.GPIO37;
-
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
 
     let timg0 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
@@ -71,21 +50,21 @@ async fn main(_spawner: Spawner) -> ! {
 
     info!("Embassy initialized!");
 
-    // --- PS2 controller on GPIO10/11/12/46 ---
+    // --- PS2 controller on GPIO4/5/6/7 ---
     let mut ps2 = Ps2Controller::new(
-        peripherals.GPIO10, // DAT (input)
-        peripherals.GPIO11, // CMD (output)
-        peripherals.GPIO12, // CLK (output)
-        peripherals.GPIO46, // ATT / CS (output, active-low)
+        peripherals.GPIO4, // DAT (input)
+        peripherals.GPIO5, // CMD (output)
+        peripherals.GPIO7, // CLK (output)
+        peripherals.GPIO6, // ATT / CS (output, active-low)
     );
-    info!("PS2 driver ready: DAT=G10 CMD=G11 CLK=G12 CS=G46");
+    info!("PS2 driver ready: DAT=G4 CMD=G5 CLK=G7 CS=G6");
 
     // Enter analog mode so the sticks are active.
     Timer::after(Duration::from_millis(200)).await;
     ps2.enter_analog_mode();
     info!("PS2 analog mode entered");
 
-    // --- SG90 servo on GPIO4 via LEDC ---
+    // --- SG90 servo on GPIO14 via LEDC ---
     // Calibrate with X/A buttons to find center, left, right duty % values.
     let mut ledc = Ledc::new(peripherals.LEDC);
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
@@ -99,7 +78,7 @@ async fn main(_spawner: Spawner) -> ! {
         })
         .unwrap();
 
-    let servo_pin = peripherals.GPIO13;
+    let servo_pin = peripherals.GPIO14;
     let mut ch = ledc.channel(channel::Number::Channel0, servo_pin);
     ch.configure(channel::config::Config {
         timer: &lstimer,
@@ -108,69 +87,142 @@ async fn main(_spawner: Spawner) -> ! {
     })
     .unwrap();
 
-    // How far to swing the steering left/right from center, in degrees.
-    const STEER_DEG: i32 = 60;
+    // --- TB6612 motor PWM channels (G1=right, G2=left) ---
+    // NOTE: Timer1 and Channel2 were both found to produce no output on this
+    // setup (see diagnostics), so the motors use Timer2 + Channel1/Channel3.
+    let mut motor_timer = ledc.timer::<LowSpeed>(timer::Number::Timer2);
+    motor_timer
+        .configure(timer::config::Config {
+            duty: timer::config::Duty::Duty12Bit,
+            clock_source: timer::LSClockSource::APBClk,
+            frequency: Rate::from_khz(10),
+        })
+        .unwrap();
+
+    let right_pwm = peripherals.GPIO1;
+    let mut ch1 = ledc.channel(channel::Number::Channel1, right_pwm);
+    ch1.configure(channel::config::Config {
+        timer: &motor_timer,
+        duty_pct: 0,
+        drive_mode: DriveMode::PushPull,
+    })
+    .unwrap();
+
+    let left_pwm = peripherals.GPIO2;
+    let mut ch2 = ledc.channel(channel::Number::Channel3, left_pwm);
+    ch2.configure(channel::config::Config {
+        timer: &motor_timer,
+        duty_pct: 0,
+        drive_mode: DriveMode::PushPull,
+    })
+    .unwrap();
+
+    // ── Control configuration ──────────────────────────────────────────
+    let cfg = control::ControlConfig {
+        steer_max_deg: 60,
+        motor_max_duty: 2048,
+        motor_slew_step: 512,
+        rx_deadzone: 3,
+        ly_deadzone: 3,
+    };
+
     // Static center offset in degrees to cancel residual mounting error.
     const CENTER_TRIM_DEG: i32 = 3;
 
-    let mut steering = Steering::new(ch, CENTER_TRIM_DEG, STEER_DEG);
+    let mut steering = Steering::new(ch, CENTER_TRIM_DEG, cfg.steer_max_deg);
 
     info!(
         "Steering: offset={}°  max={}°  PS2 right stick → steer",
-        CENTER_TRIM_DEG, STEER_DEG
+        CENTER_TRIM_DEG, cfg.steer_max_deg
     );
 
-    // Deadzone around stick center (±3 counts out of 127).
-    const RX_DEADZONE: i32 = 3;
-    // Max steering change per ~33 ms tick. Caps the servo's peak current draw
-    // so a slammed stick doesn't sag the shared 5V rail and brown out the PS2
-    // receiver. 8°/tick × ~30 Hz ≈ 240°/s → full 60° swing in ~0.25 s.
-    const SLEW_DEG_PER_TICK: i32 = 8;
-    let mut last_deg: i32 = i32::MIN;
-    let mut analog_ok = true;
+    // --- TB6612FNG motor driver (direct GPIO) ---
+    // Direction pins: AIN1=G9, AIN2=G10, BIN1=G11, BIN2=G12, STBY=G13
+    let mut motors = Tb6612::new(
+        peripherals.GPIO9,
+        peripherals.GPIO10,
+        peripherals.GPIO11,
+        peripherals.GPIO12,
+        peripherals.GPIO13,
+        ch1,
+        ch2,
+    );
+    motors.enable();
+    info!("Motors enabled");
+
+    let mut mode = control::DriveMode::Rear;
+    let mut motor_slew = control::MotorSlew::new(cfg.motor_slew_step);
+    let mut mode_switch_held: bool = false;
 
     loop {
-        let state = ps2.read();
-
-        // A power spike (servo/motor) can brown out the wireless receiver; it
-        // comes back in digital mode (byte1 nibble 0x4_) with dead sticks. Host
-        // config can't restore a wirelessly-disconnected clone pad — only its
-        // MODE button can. So we don't try to auto-recover: we FREEZE the servo
-        // (raw[5] is garbage in digital mode) and hold position until the user
-        // presses MODE. `is_analog` here is a safety gate, not a recovery path.
-        if !state.is_analog() {
-            if analog_ok {
-                info!("PS2 lost analog (byte1={:#04x}) — servo held; press MODE", state.raw[1]);
-                analog_ok = false;
+        match ps2.read() {
+            Ps2Event::LostAnalog => {
+                info!("PS2 lost analog — held; press MODE");
+                Timer::after(Duration::from_millis(50)).await;
             }
-            Timer::after(Duration::from_millis(50)).await;
-            continue;
+            Ps2Event::RecoveredAnalog => {
+                ps2.enter_analog_mode();
+                info!("PS2 analog restored and re-locked");
+                motor_slew.reset();
+            }
+            Ps2Event::Analog(state) => {
+                // ── Mode switch: L3 + R3 (edge-triggered) ──────────────
+                let switch_pressed = state.pressed(Button::L3)
+                    && state.pressed(Button::R3);
+                if switch_pressed && !mode_switch_held {
+                    motors.set_left(0);
+                    motors.set_right(0);
+                    steering.center();
+                    mode = mode.flip();
+                    motor_slew.reset();
+                    info!("mode → {:?}", mode);
+                    mode_switch_held = true;
+                    Timer::after(Duration::from_millis(33)).await;
+                    continue;
+                }
+                mode_switch_held = switch_pressed;
+
+                // ── Steering + Motors per mode ─────────────────────────
+                match mode {
+                    control::DriveMode::Rear => {
+                        // Steering: right stick → servo
+                        steering.set_target(control::rx_to_deg(
+                            state.rx(),
+                            cfg.rx_deadzone,
+                            cfg.steer_max_deg,
+                        ));
+                        steering.update(8);
+
+                        // Motors: symmetric
+                        let (l_target, r_target) = control::motor_rear(
+                            state.ly(),
+                            cfg.ly_deadzone,
+                            cfg.motor_max_duty,
+                        );
+                        let (l, r) = motor_slew.update(l_target, r_target);
+                        motors.set_left(l);
+                        motors.set_right(r);
+                    }
+                    control::DriveMode::Front => {
+                        // Steering: hold centre
+                        steering.set_target(0);
+                        steering.update(8);
+
+                        // Motors: differential
+                        let (l_target, r_target) = control::motor_front(
+                            state.ly(),
+                            state.rx(),
+                            cfg.ly_deadzone,
+                            cfg.motor_max_duty,
+                        );
+                        let (l, r) = motor_slew.update(l_target, r_target);
+                        motors.set_left(l);
+                        motors.set_right(r);
+                    }
+                }
+
+                Timer::after(Duration::from_millis(33)).await;
+            }
         }
-        if !analog_ok {
-            // Restored via MODE press. The link is stable now, so re-lock analog
-            // so it can't silently toggle back to digital on its own.
-            ps2.enter_analog_mode();
-            info!("PS2 analog restored and re-locked");
-            analog_ok = true;
-            last_deg = i32::MIN;
-        }
-
-        let rx = state.rx() as i32;
-
-        let centered = rx - 128;
-        let cmd = if centered.abs() <= RX_DEADZONE {
-            0
-        } else {
-            rx_to_deg(state.rx(), STEER_DEG)
-        };
-
-        if cmd != last_deg {
-            info!("target: {}°  rx: {}", cmd, state.rx());
-            last_deg = cmd;
-        }
-
-        steering.set_target(cmd);
-        steering.update(SLEW_DEG_PER_TICK);
-        Timer::after(Duration::from_millis(33)).await; // ~30 Hz
     }
 }

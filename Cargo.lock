@@ -1129,14 +1129,11 @@ dependencies = [
  "defmt 1.1.1",
  "embassy-executor",
  "embassy-time",
- "embedded-hal 0.2.7",
- "embedded-hal 1.0.0",
  "embedded-test",
  "esp-alloc",
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-rtos",
- "mcp23017",
  "panic-rtt-target",
  "rtt-target",
  "static_cell",
@@ -1193,15 +1190,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
-]
-
-[[package]]
-name = "mcp23017"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5a8a91843e1c4641ef9718b87b4296c9280bae160f18caa0cf721498cbc443f"
-dependencies = [
- "embedded-hal 0.2.7",
 ]
 
 [[package]]

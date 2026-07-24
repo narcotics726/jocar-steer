@@ -1,0 +1,17 @@
+- SG90 舵机：
+    * PWM / G14
+- TB6612FNG 驱动：
+    * PWMA / G1
+    * PWMB / G2
+    * AIN1 / G9
+    * AIN2 / G10
+    * BIN1 / G11
+    * BIN2 / G12
+    * STBY / G13
+    * (VCC / 3V3, GND / GND, VM / PWR, AO1 / MOTOR1-1, AO2 / MOTOR1-2, BO1 / MOTOR2-1, BO2 / MOTOR2-2)
+- PS2 Controller 接收器
+    * CLK / G7
+    * CS / G6
+    * CMD / G5
+    * DAT / G4
+    * (VCC / 3V3, GND / GND)

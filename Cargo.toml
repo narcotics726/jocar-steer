@@ -4,7 +4,7 @@ name = "jocar-steer"
 rust-version = "1.88"
 version = "0.1.0"
 
-default-run="jocar-steer"
+default-run = "jocar-steer"
 
 [[bin]]
 name = "jocar-steer"
@@ -44,9 +44,6 @@ rtt-target = { version = "0.6.2", features = ["defmt"] }
 
 critical-section = "1.2.0"
 static_cell = "2.1.1"
-mcp23017 = "1.1.0"
-embedded-hal-02 = { package = "embedded-hal", version = "0.2" }
-embedded-hal-1 = { package = "embedded-hal", version = "1" }
 xtensa-lx = "0.13"
 
 [dev-dependencies]

@@ -5,15 +5,27 @@
 //! bit-bangs the protocol using GPIO.
 //!
 //! Pin assignment (default for this project):
-//!   DAT  = GPIO10  (MISO, input)
-//!   CMD  = GPIO11  (MOSI, output)
-//!   ATT  = GPIO46  (CS, output, active-low)
-//!   CLK  = GPIO12  (SCLK, output, idle-high)
+//!   DAT  = GPIO4   (MISO, input)
+//!   CMD  = GPIO5   (MOSI, output)
+//!   CLK  = GPIO7   (SCLK, output, idle-high)
+//!   ATT  = GPIO6   (CS, output, active-low)
 
 use esp_hal::gpio::{Input, InputConfig, InputPin, Level, Output, OutputConfig, OutputPin, Pull};
 
+/// Event returned by [`Ps2Controller::read`] so callers can react to
+/// analog/digital transitions without tracking state themselves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Ps2Event {
+    /// Normal analog-mode poll with live stick data.
+    Analog(Ps2State),
+    /// The controller just dropped from analog to digital mode.
+    LostAnalog,
+    /// The controller just recovered analog mode.
+    RecoveredAnalog,
+}
+
 /// PS2 controller state decoded from a 9-byte response packet.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Ps2State {
     /// Raw 9-byte packet.
     pub raw: [u8; 9],
@@ -115,6 +127,7 @@ pub struct Ps2Controller<'d> {
     cmd: Output<'d>,
     dat: Input<'d>,
     att: Output<'d>,
+    was_analog: bool,
 }
 
 impl<'d> Ps2Controller<'d> {
@@ -123,10 +136,10 @@ impl<'d> Ps2Controller<'d> {
     /// Initializes all pins to idle state (CLK high, CMD high, ATT high).
     ///
     /// Pin order matches the physical wiring convention:
-    ///   dat_pin  = DATA  (MISO, from controller) — GPIO10
-    ///   cmd_pin  = CMD   (MOSI, to controller)   — GPIO11
-    ///   clk_pin  = CLK   (SCLK, output)           — GPIO12
-    ///   att_pin  = ATT   (CS,   active-low)        — GPIO46
+    ///   dat_pin  = DATA  (MISO, from controller) — GPIO4
+    ///   cmd_pin  = CMD   (MOSI, to controller)   — GPIO5
+    ///   clk_pin  = CLK   (SCLK, output)           — GPIO7
+    ///   att_pin  = ATT   (CS,   active-low)        — GPIO6
     pub fn new<DAT, CMD, CLK, ATT>(dat_pin: DAT, cmd_pin: CMD, clk_pin: CLK, att_pin: ATT) -> Self
     where
         DAT: InputPin + 'd,
@@ -138,7 +151,13 @@ impl<'d> Ps2Controller<'d> {
         let cmd = Output::new(cmd_pin, Level::High, OutputConfig::default());
         let clk = Output::new(clk_pin, Level::High, OutputConfig::default());
         let att = Output::new(att_pin, Level::High, OutputConfig::default());
-        Self { clk, cmd, dat, att }
+        Self {
+            clk,
+            cmd,
+            dat,
+            att,
+            was_analog: false,
+        }
     }
 
     /// Send a configuration command sequence and return the raw 9-byte response.
@@ -178,13 +197,29 @@ impl<'d> Ps2Controller<'d> {
         let _ = self.command(&[0x01, 0x43, 0x00, 0x00, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A]);
     }
 
-    /// Read the current controller state.
-    ///
-    /// Sends the standard poll command (0x01, 0x42, …) and returns
-    /// the parsed state.
-    pub fn read(&mut self) -> Ps2State {
+    /// Poll the controller and return the raw state.
+    fn read_raw(&mut self) -> Ps2State {
         let raw = self.command(&[0x01, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
         Ps2State { raw }
+    }
+
+    /// Poll the controller and return a state-change event.
+    pub fn read(&mut self) -> Ps2Event {
+        let state = self.read_raw();
+
+        if state.is_analog() {
+            if !self.was_analog {
+                self.was_analog = true;
+                return Ps2Event::RecoveredAnalog;
+            }
+            Ps2Event::Analog(state)
+        } else {
+            if self.was_analog {
+                self.was_analog = false;
+                return Ps2Event::LostAnalog;
+            }
+            Ps2Event::LostAnalog
+        }
     }
 
     /// Transfer a single byte LSB-first.
