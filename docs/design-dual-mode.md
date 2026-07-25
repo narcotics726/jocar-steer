@@ -16,19 +16,21 @@
 
 ## 2. 两个模式
 
-| | 模式1 后驱 (Rear) | 模式2 前驱 (Front) |
+| | 模式1 舵机 (Servo) | 模式2 差速 (Diff) |
 |---|---|---|
-| 车头 | 轴A (舵机) | 轴B (马达) |
+| 车头 | 轴A (舵机) | 轴A (舵机) |
 | 转向方式 | 舵机 | 马达差速 |
 | 驱动方式 | 轴B 双马达同速 | 轴B 双马达差速 |
 | 轴A 角色 | 转向 | 从动拖行（舵机回中） |
-| 物理操作 | 正常方向 | **调转车身 180°** |
+| 物理操作 | 正常方向 | 舵机回中、后轮差速 |
+
+> **原计划 vs 现实现**：起初设计差速模式时计划「先调转车头车尾 180°，然后切换成前驱差速」——即马达反转方向、马达轴作为车头做前驱差速。实际装车测试后，发现不反转马达方向（后驱差速，舵机轴仍为车头）也表现良好。理论上前驱差速略优于后驱差速（拉 vs 推），但差异有限，暂维持现状。
 
 ---
 
 ## 3. 输入映射
 
-### 模式 Rear（后驱）
+### 模式 Servo（舵机转向）
 
 | 输入 | 映射 | 死区 |
 |------|------|------|
@@ -42,7 +44,7 @@ left     = speed
 right    = speed
 ```
 
-### 模式 Front（前驱差速）
+### 模式 Diff（差速转向）
 
 | 输入 | 映射 | 死区 |
 |------|------|------|
@@ -63,13 +65,13 @@ right = clamp(base - diff, -4095, 4095)
 
 | # | 议题 | 决定 |
 |---|------|------|
-| 1 | 架构模式 | `enum DriveMode { Rear, Front }` + match |
+| 1 | 架构模式 | `enum DriveMode { Servo, Diff }` + match |
 | 2 | 模式切换按钮 | L3 + R3 同时按下 → 停车 → 翻转 |
 | 3 | 差速幅度 MAX_DIFF | 2048 (= MOTOR_DUTY) |
 | 4 | 油门 | 左摇杆 Y 比例控制 |
 | 5 | R1/L1 | 废弃 |
 | 6 | 马达反转保护 | slew-rate (512/tick) + coast-before-reverse |
-| 7 | 舵机 Front 模式 | 每 tick 更新 center |
+| 7 | 舵机 Diff 模式 | 每 tick 更新 center |
 | 8 | joystick.rs | 删除 |
 | 9 | 代码结构 | 新 `control.rs` 承载策略，main 为协调层 |
 | 10 | 摇杆死区 | RX ±3, LY ±3 |
@@ -95,8 +97,8 @@ src/
 ```rust
 pub fn ly_to_speed(ly: u8) -> i32 { ... }      // 左摇杆 → 速度，内置死区
 pub fn rx_to_deg(rx: u8, max_deg: i32) -> i32 { ... }  // 右摇杆 → 角度，内置死区
-pub fn motor_rear(ly: u8) -> (i32, i32) { ... }  // Rear: 同速
-pub fn motor_front(ly: u8, rx: u8) -> (i32, i32) { ... }  // Front: 差速
+pub fn motor_servo(ly: u8) -> (i32, i32) { ... }  // Servo: 同速
+pub fn motor_diff(ly: u8, rx: u8) -> (i32, i32) { ... }  // Diff: 差速
 ```
 
 ### 5.2 control.rs — MotorSlew
@@ -124,7 +126,7 @@ impl MotorSlew {
 
 ```rust
 #[derive(Clone, Copy, PartialEq, defmt::Format)]
-pub enum DriveMode { Rear, Front }
+pub enum DriveMode { Servo, Diff }
 impl DriveMode { pub fn flip(self) -> Self { ... } }
 
 pub struct ControlConfig {
@@ -152,7 +154,7 @@ async fn main(_spawner: Spawner) -> ! {
         steer_max_deg: 60, motor_max_duty: 2048,
         motor_slew_step: 512, rx_deadzone: 3, ly_deadzone: 3,
     };
-    let mut mode = DriveMode::Rear;
+    let mut mode = DriveMode::Servo;
     let mut motor_slew = MotorSlew::new(config.motor_slew_step);
     let mut steering = Steering::new(ch, 3, config.steer_max_deg);
     let mut motors = Tb6612::new(/* ... */);
@@ -179,8 +181,8 @@ async fn main(_spawner: Spawner) -> ! {
 
         // 马达
         let (l_target, r_target) = match mode {
-            DriveMode::Rear  => control::motor_rear(state.ly()),
-            DriveMode::Front => {
+            DriveMode::Servo  => control::motor_servo(state.ly()),
+            DriveMode::Diff => {
                 steering.set_target(0); // 舵机回中
                 control::motor_front(state.ly(), state.rx())
             }

@@ -15,3 +15,10 @@
     * CMD / G5
     * DAT / G4
     * (VCC / 3V3, GND / GND)
+- MAX98357A (待接线)
+    * SD / G45 (Pull up EN, down shutdown)
+    * GAIN / 3V3
+    * DIN / G38
+    * BCLK / G39
+    * LRC / G40
+    * (VCC / 3V3, GND / GND)

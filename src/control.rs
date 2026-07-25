@@ -1,4 +1,4 @@
-//! Control policy for dual-mode car (rear-drive / front-drive differential).
+//! Control policy for dual-mode car (servo-steer / differential-drive).
 //!
 //! Pure mapping functions translate PS2 stick/button bytes into steering
 //! and motor commands. [`MotorSlew`] adds stateful slew-rate limiting and
@@ -23,20 +23,20 @@ pub struct ControlConfig {
 
 // ── Drive mode ────────────────────────────────────────────────────────
 
-/// Which end of the car is the "front".
+/// Steering strategy for the car.
 #[derive(Clone, Copy, PartialEq, defmt::Format)]
 pub enum DriveMode {
-    /// Servo axle is front; motors push symmetrically from the rear.
-    Rear,
-    /// Motor axle is front; differential steering, servo centred.
-    Front,
+    /// Servo axle steers; both motors drive symmetrically.
+    Servo,
+    /// Servo centred; motors drive differentially for steering.
+    Diff,
 }
 
 impl DriveMode {
     pub fn flip(self) -> Self {
         match self {
-            Self::Rear => Self::Front,
-            Self::Front => Self::Rear,
+            Self::Servo => Self::Diff,
+            Self::Diff => Self::Servo,
         }
     }
 }
@@ -69,15 +69,15 @@ pub fn rx_to_deg(rx: u8, deadzone: i32, max_deg: i32) -> i32 {
     centered * max_deg / 128
 }
 
-/// Rear-drive motor command: both motors at the same speed.
-pub fn motor_rear(ly: u8, deadzone: i32, max_duty: i32) -> (i32, i32) {
+/// Servo-mode motor command: both motors at the same speed.
+pub fn motor_servo(ly: u8, deadzone: i32, max_duty: i32) -> (i32, i32) {
     let s = ly_to_speed(ly, deadzone, max_duty);
     (s, s)
 }
 
-/// Front-drive differential motor command: left/right speed split by
-/// right-stick X position.
-pub fn motor_front(ly: u8, rx: u8, deadzone: i32, max_duty: i32) -> (i32, i32) {
+/// Diff-mode motor command: left/right speed split by right-stick X
+/// position for differential steering.
+pub fn motor_diff(ly: u8, rx: u8, deadzone: i32, max_duty: i32) -> (i32, i32) {
     let base = ly_to_speed(ly, deadzone, max_duty);
 
     let centered = rx as i32 - 128;

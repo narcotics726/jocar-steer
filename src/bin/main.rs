@@ -13,7 +13,7 @@ use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::gpio::DriveMode;
 use esp_hal::ledc::{
-    Ledc, LowSpeed, LSGlobalClkSource,
+    LSGlobalClkSource, Ledc, LowSpeed,
     channel::{self, ChannelIFace},
     timer::{self, TimerIFace},
 };
@@ -40,6 +40,44 @@ async fn main(_spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+
+    // Strapping
+    let _ = peripherals.GPIO0;
+    let _ = peripherals.GPIO3;
+    let _ = peripherals.GPIO45;
+    let _ = peripherals.GPIO46;
+
+    // usb/jtag
+    let _ = peripherals.GPIO19;
+    let _ = peripherals.GPIO20;
+
+    //
+    // we use probe_rs to flash the board, 
+    // so the jtag & uart pins are free to use
+    //
+    // // jtag
+    // let _ = peripherals.GPIO39;
+    // let _ = peripherals.GPIO40;
+    // let _ = peripherals.GPIO41;
+    // let _ = peripherals.GPIO42;
+
+    // // uart
+    // let _ = peripherals.GPIO43;
+    // let _ = peripherals.GPIO44;
+    
+    // flash/psram
+    let _ = peripherals.GPIO26;
+    let _ = peripherals.GPIO27;
+    let _ = peripherals.GPIO28;
+    let _ = peripherals.GPIO29;
+    let _ = peripherals.GPIO30;
+    let _ = peripherals.GPIO31;
+    let _ = peripherals.GPIO32;
+    let _ = peripherals.GPIO33;
+    let _ = peripherals.GPIO34;
+    let _ = peripherals.GPIO35;
+    let _ = peripherals.GPIO36;
+    let _ = peripherals.GPIO37;
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
 
@@ -150,7 +188,7 @@ async fn main(_spawner: Spawner) -> ! {
     motors.enable();
     info!("Motors enabled");
 
-    let mut mode = control::DriveMode::Rear;
+    let mut mode = control::DriveMode::Servo;
     let mut motor_slew = control::MotorSlew::new(cfg.motor_slew_step);
     let mut mode_switch_held: bool = false;
 
@@ -167,8 +205,7 @@ async fn main(_spawner: Spawner) -> ! {
             }
             Ps2Event::Analog(state) => {
                 // ── Mode switch: L3 + R3 (edge-triggered) ──────────────
-                let switch_pressed = state.pressed(Button::L3)
-                    && state.pressed(Button::R3);
+                let switch_pressed = state.pressed(Button::L3) && state.pressed(Button::R3);
                 if switch_pressed && !mode_switch_held {
                     motors.set_left(0);
                     motors.set_right(0);
@@ -184,7 +221,7 @@ async fn main(_spawner: Spawner) -> ! {
 
                 // ── Steering + Motors per mode ─────────────────────────
                 match mode {
-                    control::DriveMode::Rear => {
+                    control::DriveMode::Servo => {
                         // Steering: right stick → servo
                         steering.set_target(control::rx_to_deg(
                             state.rx(),
@@ -194,22 +231,19 @@ async fn main(_spawner: Spawner) -> ! {
                         steering.update(8);
 
                         // Motors: symmetric
-                        let (l_target, r_target) = control::motor_rear(
-                            state.ly(),
-                            cfg.ly_deadzone,
-                            cfg.motor_max_duty,
-                        );
+                        let (l_target, r_target) =
+                            control::motor_servo(state.ly(), cfg.ly_deadzone, cfg.motor_max_duty);
                         let (l, r) = motor_slew.update(l_target, r_target);
                         motors.set_left(l);
                         motors.set_right(r);
                     }
-                    control::DriveMode::Front => {
+                    control::DriveMode::Diff => {
                         // Steering: hold centre
                         steering.set_target(0);
                         steering.update(8);
 
                         // Motors: differential
-                        let (l_target, r_target) = control::motor_front(
+                        let (l_target, r_target) = control::motor_diff(
                             state.ly(),
                             state.rx(),
                             cfg.ly_deadzone,
