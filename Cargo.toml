@@ -26,6 +26,11 @@ name = "ws2812-test"
 path = "./src/bin/ws2812-test.rs"
 test = false
 
+[[bin]]
+name = "pcf8575-test"
+path = "./src/bin/pcf8575-test.rs"
+test = false
+
 [[test]]
 harness = false
 name = "hello_test"
