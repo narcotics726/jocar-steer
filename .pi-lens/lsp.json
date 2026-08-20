@@ -1,0 +1,10 @@
+{
+  "serverOverrides": {
+    "rust": {
+      "initializationOptions": {
+        "check": { "allTargets": false },
+        "checkOnSave": { "allTargets": false }
+      }
+    }
+  }
+}

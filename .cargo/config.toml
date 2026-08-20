@@ -1,14 +1,17 @@
 [target.xtensa-esp32s3-none-elf]
-runner = "probe-rs run --chip=esp32s3 --preverify --always-print-stacktrace --no-location"
+runner = "espflash flash --monitor -L defmt"
+
+# `cargo test` is not used in this firmware — all verification is manual
+# (flash + monitor). Alias it to a plain build so `cargo test` never tries to
+# compile host test harnesses for this no_std target.
+[alias]
+test = "build"
 
 [env]
-DEFMT_LOG="info"
+DEFMT_LOG = "info"
 
 [build]
-rustflags = [
-  "-C", "link-arg=-nostartfiles",
-  "-Z", "stack-protector=all",
-]
+rustflags = ["-C", "link-arg=-nostartfiles", "-Z", "stack-protector=all"]
 
 target = "xtensa-esp32s3-none-elf"
 
