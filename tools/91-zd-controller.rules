@@ -1,0 +1,6 @@
+# ZD Controller 2345:e023 — allow non-root libusb access to vendor interface 0
+# (analog triggers / IMU channel). Install:
+#   sudo cp tools/91-zd-controller.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger
+#   replug the receiver
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2345", ATTRS{idProduct}=="e023", MODE="0666"

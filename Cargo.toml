@@ -31,17 +31,37 @@ name = "pcf8575-test"
 path = "./src/bin/pcf8575-test.rs"
 test = false
 
-[[test]]
-harness = false
-name = "hello_test"
+[[bin]]
+name = "servo-test"
+path = "./src/bin/servo-test.rs"
+test = false
+
+[[bin]]
+name = "usb-gamepad-test"
+path = "./src/bin/usb-gamepad-test.rs"
+test = false
+
+[[bin]]
+name = "usb-gamepad-car"
+path = "./src/bin/usb-gamepad-car.rs"
+test = false
+
+[[bin]]
+name = "usb-gamepad-map-test"
+path = "./src/bin/usb-gamepad-map-test.rs"
+test = false
 
 [lib]
 test = false
 
 [dependencies]
-esp-hal = { version = "~1.1.0", features = ["defmt", "esp32s3", "unstable"] }
+esp-hal = { git = "https://github.com/esp-rs/esp-hal", rev = "667f8f02", features = [
+  "defmt",
+  "esp32s3",
+  "unstable",
+] }
 
-esp-rtos = { version = "0.3.0", features = [
+esp-rtos = { git = "https://github.com/esp-rs/esp-hal", rev = "667f8f02", features = [
   "defmt",
   "embassy",
   "esp-alloc",

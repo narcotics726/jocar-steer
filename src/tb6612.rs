@@ -165,3 +165,89 @@ where
         self.pwm_b.set_duty_hw(0);
     }
 }
+
+/// TB6612FNG single-motor driver (single motor + driveshaft chassis).
+///
+/// Uses only channel A: AIN1/AIN2 for direction, one LEDC PWM channel for
+/// speed and the shared STBY line. Direction/speed semantics match
+/// [`Tb6612::set_right`] (positive → forward, negative → reverse, 0 → coast).
+///
+/// # Type parameters
+///
+/// * `Ch` — LEDC channel for the motor PWM (PWMA), must implement [`ChannelHW`].
+pub struct Tb6612Single<'d, Ch> {
+    ain1: Output<'d>,
+    ain2: Output<'d>,
+    stby: Output<'d>,
+    pwm: Ch,
+}
+
+impl<'d, Ch> Tb6612Single<'d, Ch>
+where
+    Ch: ChannelHW,
+{
+    /// Create a new single-motor driver.
+    ///
+    /// Direction pins start low (coast) and STBY = 0 (motors disabled /
+    /// standby). The PWM channel is not modified during construction.
+    pub fn new<A1, A2, ST>(ain1: A1, ain2: A2, stby: ST, pwm: Ch) -> Self
+    where
+        A1: OutputPin + 'd,
+        A2: OutputPin + 'd,
+        ST: OutputPin + 'd,
+    {
+        info!("Tb6612Single: new() — direct GPIO, STBY=0 (standby)");
+        Self {
+            ain1: Output::new(ain1, Level::Low, OutputConfig::default()),
+            ain2: Output::new(ain2, Level::Low, OutputConfig::default()),
+            stby: Output::new(stby, Level::Low, OutputConfig::default()),
+            pwm,
+        }
+    }
+
+    /// Enable the motor by driving the STDBY line high.
+    pub fn enable(&mut self) {
+        self.stby.set_high();
+        info!("Tb6612Single: enable()");
+    }
+
+    /// Disable the motor by driving the STDBY line low (coast).
+    pub fn standby(&mut self) {
+        self.stby.set_low();
+        info!("Tb6612Single: standby()");
+    }
+
+    /// Set motor speed and direction.
+    ///
+    /// `speed` range (12-bit signed): positive → forward, negative → reverse,
+    /// 0 → coast (high-impedance freewheel via IN1=0, IN2=0, PWM=0). Use
+    /// [`brake`](Self::brake) for an active stop.
+    pub fn set_motor(&mut self, speed: i32) {
+        let speed = speed.clamp(-4095, 4095);
+        if speed > 0 {
+            self.ain1.set_high();
+            self.ain2.set_low();
+            self.pwm.set_duty_hw(speed as u32);
+        } else if speed < 0 {
+            self.ain1.set_low();
+            self.ain2.set_high();
+            self.pwm.set_duty_hw((-speed) as u32);
+        } else {
+            self.coast();
+        }
+    }
+
+    /// Short brake (IN1=1, IN2=1, PWM=0).
+    pub fn brake(&mut self) {
+        self.ain1.set_high();
+        self.ain2.set_high();
+        self.pwm.set_duty_hw(0);
+    }
+
+    /// Coast (IN1=0, IN2=0, PWM=0).
+    pub fn coast(&mut self) {
+        self.ain1.set_low();
+        self.ain2.set_low();
+        self.pwm.set_duty_hw(0);
+    }
+}
