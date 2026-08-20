@@ -6,11 +6,17 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use jocar_steer::ps2::{Ps2Controller, Ps2Event};
-use panic_rtt_target as _;
+use esp_println as _;
 
 extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    defmt::error!("Panic: {}", defmt::Display2Format(info));
+    loop {}
+}
 
 #[allow(
     clippy::large_stack_frames,
@@ -18,7 +24,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
 )]
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
-    rtt_target::rtt_init_defmt!();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);

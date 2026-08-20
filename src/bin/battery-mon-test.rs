@@ -7,11 +7,17 @@ use embassy_time::{Duration, Timer};
 use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation};
 use esp_hal::clock::CpuClock;
 use jocar_steer::battery::BatteryMonitor;
-use panic_rtt_target as _;
+use esp_println as _;
 
 extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    defmt::error!("Panic: {}", defmt::Display2Format(info));
+    loop {}
+}
 
 /// Update interval in milliseconds.
 const UPDATE_MS: u64 = 500;
@@ -22,7 +28,6 @@ const UPDATE_MS: u64 = 500;
 )]
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
-    rtt_target::rtt_init_defmt!();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);

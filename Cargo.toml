@@ -49,25 +49,32 @@ esp-rtos = { version = "0.3.0", features = [
 ] }
 
 defmt = "1.0.1"
-esp-bootloader-esp-idf = { version = "0.5.0", features = ["defmt", "esp32s3"] }
+esp-bootloader-esp-idf = { git = "https://github.com/esp-rs/esp-hal", rev = "667f8f02", features = [
+  "defmt",
+  "esp32s3",
+] }
+esp-storage = { git = "https://github.com/esp-rs/esp-hal", rev = "667f8f02", features = [
+  "esp32s3",
+  "embedded-storage",
+] }
 
 embassy-executor = { version = "0.10.0", features = ["defmt"] }
 embassy-time = { version = "0.5.0", features = ["defmt"] }
+embassy-usb-driver = "0.2.1"
+embassy-usb-host = { version = "0.1.0", default-features = false, features = [
+  "defmt",
+] }
 esp-alloc = { version = "0.10.0", features = ["defmt"] }
-panic-rtt-target = { version = "0.2.0", features = ["defmt"] }
-rtt-target = { version = "0.6.2", features = ["defmt"] }
+esp-println = { version = "0.17.0", default-features = false, features = [
+  "esp32s3",
+  "uart",
+  "defmt-espflash",
+  "critical-section",
+] }
 
 critical-section = "1.2.0"
 static_cell = "2.1.1"
 xtensa-lx = "0.13"
-
-[dev-dependencies]
-embedded-test = { version = "0.7.1", features = [
-  "defmt",
-  "embassy-010",
-  "external-executor",
-  "xtensa-semihosting",
-] }
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
 [profile.dev]

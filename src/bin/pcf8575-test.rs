@@ -12,11 +12,17 @@ use esp_hal::{
     i2c::master::{Config, I2c},
     time::Rate,
 };
-use panic_rtt_target as _;
+use esp_println as _;
 
 extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    defmt::error!("Panic: {}", defmt::Display2Format(info));
+    loop {}
+}
 
 /// PCF8575 I2C address (A0=A1=A2=GND).
 const PCF8575_ADDR: u8 = 0x20;
@@ -43,7 +49,6 @@ fn pcf8575_write(i2c: &mut I2c<'_, esp_hal::Blocking>, low: u8, high: u8) {
 )]
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
-    rtt_target::rtt_init_defmt!();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);

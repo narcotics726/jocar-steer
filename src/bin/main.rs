@@ -23,12 +23,18 @@ use jocar_steer::control;
 use jocar_steer::ps2::{Button, Ps2Controller, Ps2Event};
 use jocar_steer::steering::Steering;
 use jocar_steer::tb6612::Tb6612;
-use panic_rtt_target as _;
+use esp_println as _;
 
 extern crate alloc;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 esp_bootloader_esp_idf::esp_app_desc!();
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    defmt::error!("Panic: {}", defmt::Display2Format(info));
+    loop {}
+}
 
 #[allow(
     clippy::large_stack_frames,
@@ -36,7 +42,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
 )]
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
-    rtt_target::rtt_init_defmt!();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
@@ -73,6 +78,9 @@ async fn main(_spawner: Spawner) -> ! {
     let _ = peripherals.GPIO30;
     let _ = peripherals.GPIO31;
     let _ = peripherals.GPIO32;
+    // octal flash/psram, might never need it
+    // but reserve them for now
+    // can be released once we are out of gpios
     let _ = peripherals.GPIO33;
     let _ = peripherals.GPIO34;
     let _ = peripherals.GPIO35;

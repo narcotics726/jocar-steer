@@ -26,3 +26,12 @@ target/
 **/.DS_Store
 .env
 .pi-subagents
+# Local Pi runtime state
+.atl/
+
+# Python caches (tools/)
+__pycache__/
+
+# pi-lens runtime state (keep lsp.json only)
+/.pi-lens/cache/
+/.pi-lens/change-log.jsonl

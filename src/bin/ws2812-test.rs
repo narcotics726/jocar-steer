@@ -12,11 +12,17 @@ use jocar_steer::control::DriveMode;
 use jocar_steer::lighting::ws2812_stat_indicator::{
     Rgb, StatusInput, Ws2812StatIndicator,
 };
-use panic_rtt_target as _;
+use esp_println as _;
 
 extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    defmt::error!("Panic: {}", defmt::Display2Format(info));
+    loop {}
+}
 
 // ── WS2812 timing (80 MHz RMT clock = 12.5 ns / tick) ──────────────
 
@@ -132,7 +138,6 @@ impl Sim {
 #[allow(clippy::large_stack_frames, reason = "main is the entry point")]
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
-    rtt_target::rtt_init_defmt!();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);

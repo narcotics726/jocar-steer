@@ -1,6 +1,5 @@
 fn main() {
     linker_be_nice();
-    println!("cargo:rustc-link-arg-tests=-Tembedded-test.x");
     println!("cargo:rustc-link-arg=-Tdefmt.x");
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
@@ -24,20 +23,6 @@ fn linker_be_nice() {
                 "_stack_start" => {
                     eprintln!();
                     eprintln!("💡 Is the linker script `linkall.x` missing?");
-                    eprintln!();
-                }
-                what if what.starts_with("esp_rtos_") => {
-                    eprintln!();
-                    eprintln!(
-                        "💡 `esp-radio` has no scheduler enabled. Make sure you have initialized `esp-rtos` or provided an external scheduler."
-                    );
-                    eprintln!();
-                }
-                "embedded_test_linker_file_not_added_to_rustflags" => {
-                    eprintln!();
-                    eprintln!(
-                        "💡 `embedded-test` not found - make sure `embedded-test.x` is added as a linker script for tests"
-                    );
                     eprintln!();
                 }
                 "free"
