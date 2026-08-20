@@ -35,3 +35,8 @@ __pycache__/
 # pi-lens runtime state (keep lsp.json only)
 /.pi-lens/cache/
 /.pi-lens/change-log.jsonl
+/.pi-lens/*.jsonl
+/.pi-lens/metrics-history.json
+/.pi-lens/recent-touches.json
+/.pi-lens/turn-state.json
+/.pi-lens/sessions/
