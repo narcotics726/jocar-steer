@@ -1,0 +1,150 @@
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    theme-id: 0
+  }
+}
+
+# ---- 元件（红=电源件 黄=降压/电机 蓝=驱动 绿=ESP32/地）----
+battery: 2S 电池 7.4V {
+  shape: rectangle
+  style.fill: "#ffc9c9"
+  style.stroke: "#ef4444"
+}
+sw: 开关 3A {
+  shape: rectangle
+  style.fill: "#ffffff"
+}
+buck: MP1584EN 固定5V {
+  shape: rectangle
+  style.fill: "#fff3bf"
+  style.stroke: "#f59e0b"
+}
+drv: TB6612 驱动 {
+  shape: rectangle
+  style.fill: "#a5d8ff"
+  style.stroke: "#4a9eed"
+}
+esp: ESP32-S3 HW678 {
+  shape: rectangle
+  style.fill: "#c3fae8"
+  style.stroke: "#22c55e"
+}
+servo: SG90 舵机 {
+  shape: rectangle
+  style.fill: "#ffd8a8"
+  style.stroke: "#f59e0b"
+}
+motor: N30 马达 {
+  shape: rectangle
+  style.fill: "#ffd8a8"
+  style.stroke: "#f59e0b"
+}
+gnd: 共地点 {
+  shape: ellipse
+  style.fill: "#d3f9d8"
+  style.stroke: "#22c55e"
+}
+
+# ---- 电容（两端都显式：电源轨 ↔ 共地点）----
+c1: 1000uF/16V {
+  style.fill: "#ffc9c9"
+}
+c1 -- battery {
+  style.stroke: "#ef4444"
+}
+c1 -- gnd {
+  style.stroke: "#22c55e"
+}
+
+c2: 1000uF/16V {
+  style.fill: "#fff3bf"
+}
+c2 -- buck {
+  style.stroke: "#f59e0b"
+}
+c2 -- gnd {
+  style.stroke: "#22c55e"
+}
+
+c3: 1000uF/16V {
+  style.fill: "#a5d8ff"
+}
+c3 -- drv {
+  style.stroke: "#4a9eed"
+}
+c3 -- gnd {
+  style.stroke: "#22c55e"
+}
+
+c4: 470uF {
+  style.fill: "#ffd8a8"
+}
+c4 -- servo {
+  style.stroke: "#f59e0b"
+}
+c4 -- gnd {
+  style.stroke: "#22c55e"
+}
+
+c5: 100nF {
+  style.fill: "#ffd8a8"
+}
+c5 -- motor {
+  style.stroke: "#f59e0b"
+}
+
+# ---- 电源（红）----
+battery -> buck: BAT+ → IN+ {
+  style.stroke: "#ef4444"
+}
+battery -> drv: VM 7.4V {
+  style.stroke: "#ef4444"
+}
+buck -> esp: 5V {
+  style.stroke: "#ef4444"
+}
+buck -> servo: 5V → 舵机+ {
+  style.stroke: "#ef4444"
+}
+
+# ---- 地线（绿，星形汇聚到共地点）----
+battery -> sw: BAT- {
+  style.stroke: "#22c55e"
+}
+sw -> gnd: 开关后 {
+  style.stroke: "#22c55e"
+}
+buck -> gnd: IN-/OUT- {
+  style.stroke: "#22c55e"
+}
+drv -> gnd: GND {
+  style.stroke: "#22c55e"
+}
+esp -> gnd: GND {
+  style.stroke: "#22c55e"
+}
+servo -> gnd: - {
+  style.stroke: "#22c55e"
+}
+
+# ---- 信号（蓝）----
+esp -> drv: G9/10/1/13 → AIN1/2/PWMA/STBY {
+  style.stroke: "#4a9eed"
+}
+esp -> drv: 3V3 → VCC {
+  style.stroke: "#4a9eed"
+}
+esp -> servo: G14 → 信号 {
+  style.stroke: "#4a9eed"
+}
+
+# ---- 电机（橙）----
+drv -> motor: AO1/AO2 → I1/I2 {
+  style.stroke: "#f59e0b"
+}
+
+# ---- 说明 ----
+note1: 全部电容负脚 → 共地点\nOTG 口 ← 接收器(hub) 直插，VBUS=5V 焊盘桥 {
+  shape: text
+}

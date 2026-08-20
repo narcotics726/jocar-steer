@@ -1,0 +1,38 @@
+* jocar-steer power budget - DC check (2026-08)
+* Topology: BAT+ -> buck IN+ & AT8236 VM; BAT- -> switch -> p_ret (共地点)
+* All return currents (motor + buck input) pass through the low-side switch.
+* Run:  ngspice -b docs/circuit/power-budget.cir
+* 2S / 3S / 3S-full: edit .param vbat=7.4 -> 11.1 -> 12.6
+.param vbat=7.4
+
+VBAT p_bat 0 DC {vbat}
+RSW  p_ret 0 0.02
+* motor path: BAT+ -> AT8236 Rds(200m) -> N30 winding(3ohm, stall) -> p_ret
+RDRV_H p_bat n_a 0.2
+RMOT   n_a  n_b 3.0
+RDRV_L n_b  p_ret 0.2
+* buck output (MP1584EN fixed 5V), OUT- referenced to p_ret
+V5VS n_5v p_ret DC 5
+R5O  n_5v n_5v2 0.1
+* 5V rail loads
+R_ESP n_5v2 p_ret 12.5    $ ESP32 ~0.4A
+R_RX  n_5v2 p_ret 50      $ receiver ~0.1A
+R_SRV n_5v2 p_ret 7.14    $ servo stall 0.7A
+* buck input current (P_in = P_out/eta), returns via p_ret -> switch
+BIN  p_bat p_ret I = {5.0*abs(i(V5VS))/(0.88*vbat)}
+
+.op
+.control
+op
+let rail5   = v(n_5v2)
+let b_out   = abs(i(V5VS))
+let m_stall = (v(n_a) - v(n_b))/3.0
+let sw_i    = v(p_ret)/0.02
+let b_in    = b_out*5.0/0.88/vbat
+echo "5V_rail_V       = " $&rail5
+echo "buck_out_A      = " $&b_out
+echo "motor_stall_A   = " $&m_stall
+echo "buck_in_A       = " $&b_in
+echo "switch_A(total) = " $&sw_i
+.endc
+.end

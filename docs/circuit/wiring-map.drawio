@@ -1,0 +1,180 @@
+<?xml version="1.0" ?>
+<mxfile host="app.diagrams.net">
+  <diagram name="jocar-wiring" id="jocar1">
+    <mxGraphModel dx="1000" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="bat" value="2S 电池 7.4V" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffc9c9;strokeColor=#ef4444;fontSize=14;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="50" y="100" width="170" height="80" as_="geometry"/>
+        </mxCell>
+        <mxCell id="buck" value="MP1584EN 固定5V" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3bf;strokeColor=#f59e0b;fontSize=14;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="270" y="110" width="160" height="80" as_="geometry"/>
+        </mxCell>
+        <mxCell id="c1" value="1000uF/16V" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffc9c9;strokeColor=#ef4444;fontSize=14;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="50" y="190" width="110" height="26" as_="geometry"/>
+        </mxCell>
+        <mxCell id="tb" value="TB6612 驱动&lt;br&gt;AIN1:G9 AIN2:G10&lt;br&gt;PWMA:G1 STBY:G13" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a5d8ff;strokeColor=#4a9eed;fontSize=14;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="540" y="90" width="230" height="130" as_="geometry"/>
+        </mxCell>
+        <mxCell id="esp" value="ESP32-S3 HW678&lt;br&gt;5VIN 3V3 GND&lt;br&gt;OTG口&amp;lt;-接收器(hub) VBUS=5V焊盘桥&lt;br&gt;GPIO9/10/1/13/14 -&amp;gt; 驱动/舵机" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c3fae8;strokeColor=#22c55e;fontSize=14;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="540" y="280" width="230" height="150" as_="geometry"/>
+        </mxCell>
+        <mxCell id="sw" value="开关 3A" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#1e1e1e;fontSize=14;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="60" y="300" width="140" height="50" as_="geometry"/>
+        </mxCell>
+        <mxCell id="srv" value="SG90 舵机&lt;br&gt;+5V / 信号G14" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd8a8;strokeColor=#f59e0b;fontSize=14;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="280" y="330" width="180" height="80" as_="geometry"/>
+        </mxCell>
+        <mxCell id="mot" value="N30 马达" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd8a8;strokeColor=#f59e0b;fontSize=14;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="600" y="480" width="170" height="70" as_="geometry"/>
+        </mxCell>
+        <mxCell id="gnds" value="共地点" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d3f9d8;strokeColor=#22c55e;fontSize=14;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="140" y="470" width="80" height="80" as_="geometry"/>
+        </mxCell>
+        <mxCell id="c2" value="1000uF 近OUT" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3bf;strokeColor=#f59e0b;fontSize=14;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="260" y="200" width="110" height="26" as_="geometry"/>
+        </mxCell>
+        <mxCell id="c3" value="1000uF 近VM" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a5d8ff;strokeColor=#4a9eed;fontSize=14;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="540" y="45" width="110" height="26" as_="geometry"/>
+        </mxCell>
+        <mxCell id="c4" value="470uF 舵机" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd8a8;strokeColor=#f59e0b;fontSize=14;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="250" y="440" width="100" height="24" as_="geometry"/>
+        </mxCell>
+        <mxCell id="c5" value="100nF 马达" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd8a8;strokeColor=#f59e0b;fontSize=14;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="600" y="440" width="110" height="26" as_="geometry"/>
+        </mxCell>
+        <mxCell id="p2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#ef4444;strokeWidth=2;endArrow=block;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="bat" target="buck">
+          <mxGeometry relative="1" as_="geometry"/>
+          <mxCell id="p2_lbl" value="BAT+ -&amp;gt; IN+" style="edgeLabel;html=1;align=center;" vertex="1" connectable="0" parent="p2">
+            <mxGeometry x="0.5" y="0.5" relative="1" as_="geometry">
+              <mxPoint x="0" y="-8" as_="offset"/>
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+        <mxCell id="lc1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#ef4444;strokeWidth=1.5;endArrow=block;exitX=0.5;exitY=0;entryX=0.5;entryY=1;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="c1" target="bat">
+          <mxGeometry relative="1" as_="geometry"/>
+        </mxCell>
+        <mxCell id="p1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#ef4444;strokeWidth=2;endArrow=block;exitX=1;exitY=0.25;entryX=0;entryY=0.25;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="bat" target="tb">
+          <mxGeometry relative="1" as_="geometry"/>
+          <mxCell id="p1_lbl" value="VM 7.4V 直供" style="edgeLabel;html=1;align=center;" vertex="1" connectable="0" parent="p1">
+            <mxGeometry x="0.5" y="0.5" relative="1" as_="geometry">
+              <mxPoint x="0" y="-8" as_="offset"/>
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+        <mxCell id="p3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#ef4444;strokeWidth=2;endArrow=block;exitX=1;exitY=0.5;entryX=0;entryY=0.25;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="buck" target="esp">
+          <mxGeometry relative="1" as_="geometry"/>
+          <mxCell id="p3_lbl" value="5V 轨" style="edgeLabel;html=1;align=center;" vertex="1" connectable="0" parent="p3">
+            <mxGeometry x="0.5" y="0.5" relative="1" as_="geometry">
+              <mxPoint x="0" y="-8" as_="offset"/>
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+        <mxCell id="p4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#ef4444;strokeWidth=2;endArrow=block;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="buck" target="srv">
+          <mxGeometry relative="1" as_="geometry"/>
+          <mxCell id="p4_lbl" value="5V -&amp;gt; 舵机+" style="edgeLabel;html=1;align=center;" vertex="1" connectable="0" parent="p4">
+            <mxGeometry x="0.5" y="0.5" relative="1" as_="geometry">
+              <mxPoint x="0" y="-8" as_="offset"/>
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+        <mxCell id="g1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#22c55e;strokeWidth=2;endArrow=block;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="bat" target="sw">
+          <mxGeometry relative="1" as_="geometry"/>
+          <mxCell id="g1_lbl" value="BAT-" style="edgeLabel;html=1;align=center;" vertex="1" connectable="0" parent="g1">
+            <mxGeometry x="0.5" y="0.5" relative="1" as_="geometry">
+              <mxPoint x="0" y="-8" as_="offset"/>
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+        <mxCell id="g2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#22c55e;strokeWidth=2;endArrow=block;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="sw" target="gnds">
+          <mxGeometry relative="1" as_="geometry"/>
+          <mxCell id="g2_lbl" value="开关后" style="edgeLabel;html=1;align=center;" vertex="1" connectable="0" parent="g2">
+            <mxGeometry x="0.5" y="0.5" relative="1" as_="geometry">
+              <mxPoint x="0" y="-8" as_="offset"/>
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+        <mxCell id="g3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#22c55e;strokeWidth=2;endArrow=block;exitX=0.15;exitY=1;entryX=1;entryY=0.05;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="buck" target="gnds">
+          <mxGeometry relative="1" as_="geometry"/>
+          <mxCell id="g3_lbl" value="IN-/OUT-" style="edgeLabel;html=1;align=center;" vertex="1" connectable="0" parent="g3">
+            <mxGeometry x="0.5" y="0.5" relative="1" as_="geometry">
+              <mxPoint x="0" y="-8" as_="offset"/>
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+        <mxCell id="g4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#22c55e;strokeWidth=2;endArrow=block;exitX=0.35;exitY=1;entryX=1;entryY=0.5;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="tb" target="gnds">
+          <mxGeometry relative="1" as_="geometry"/>
+          <mxCell id="g4_lbl" value="GND" style="edgeLabel;html=1;align=center;" vertex="1" connectable="0" parent="g4">
+            <mxGeometry x="0.5" y="0.5" relative="1" as_="geometry">
+              <mxPoint x="0" y="-8" as_="offset"/>
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+        <mxCell id="g5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#22c55e;strokeWidth=2;endArrow=block;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="srv" target="gnds">
+          <mxGeometry relative="1" as_="geometry"/>
+          <mxCell id="g5_lbl" value="-" style="edgeLabel;html=1;align=center;" vertex="1" connectable="0" parent="g5">
+            <mxGeometry x="0.5" y="0.5" relative="1" as_="geometry">
+              <mxPoint x="0" y="-8" as_="offset"/>
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+        <mxCell id="g6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#22c55e;strokeWidth=2;endArrow=block;exitX=0.15;exitY=1;entryX=1;entryY=0.5;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="esp" target="gnds">
+          <mxGeometry relative="1" as_="geometry"/>
+          <mxCell id="g6_lbl" value="GND" style="edgeLabel;html=1;align=center;" vertex="1" connectable="0" parent="g6">
+            <mxGeometry x="0.5" y="0.5" relative="1" as_="geometry">
+              <mxPoint x="0" y="-8" as_="offset"/>
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+        <mxCell id="s1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#4a9eed;strokeWidth=1.5;endArrow=block;exitX=0.35;exitY=0;entryX=0.35;entryY=1;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="esp" target="tb">
+          <mxGeometry relative="1" as_="geometry"/>
+          <mxCell id="s1_lbl" value="G9/10/1/13 -&amp;gt; AIN1/2/PWMA/STBY" style="edgeLabel;html=1;align=center;" vertex="1" connectable="0" parent="s1">
+            <mxGeometry x="0.5" y="0.5" relative="1" as_="geometry">
+              <mxPoint x="0" y="-8" as_="offset"/>
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+        <mxCell id="s2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#4a9eed;strokeWidth=1.5;endArrow=block;exitX=0.85;exitY=0;entryX=0.85;entryY=1;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="esp" target="tb">
+          <mxGeometry relative="1" as_="geometry"/>
+          <mxCell id="s2_lbl" value="3V3 -&amp;gt; VCC" style="edgeLabel;html=1;align=center;" vertex="1" connectable="0" parent="s2">
+            <mxGeometry x="0.5" y="0.5" relative="1" as_="geometry">
+              <mxPoint x="0" y="-8" as_="offset"/>
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+        <mxCell id="s3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#4a9eed;strokeWidth=1.5;endArrow=block;exitX=0.05;exitY=1;entryX=1;entryY=0.5;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="esp" target="srv">
+          <mxGeometry relative="1" as_="geometry"/>
+          <mxCell id="s3_lbl" value="G14 -&amp;gt; 信号" style="edgeLabel;html=1;align=center;" vertex="1" connectable="0" parent="s3">
+            <mxGeometry x="0.5" y="0.5" relative="1" as_="geometry">
+              <mxPoint x="0" y="-8" as_="offset"/>
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+        <mxCell id="m1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#f59e0b;strokeWidth=2;endArrow=block;exitX=1;exitY=0.35;entryX=1;entryY=0.5;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="tb" target="mot">
+          <mxGeometry relative="1" as_="geometry"/>
+          <mxCell id="m1_lbl" value="AO1/AO2 -&amp;gt; I1/I2" style="edgeLabel;html=1;align=center;" vertex="1" connectable="0" parent="m1">
+            <mxGeometry x="0.5" y="0.5" relative="1" as_="geometry">
+              <mxPoint x="0" y="-8" as_="offset"/>
+            </mxGeometry>
+          </mxCell>
+        </mxCell>
+        <mxCell id="lc2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#f59e0b;strokeWidth=1.5;endArrow=block;exitX=1;exitY=0.5;entryX=1;entryY=0.5;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="c2" target="buck">
+          <mxGeometry relative="1" as_="geometry"/>
+        </mxCell>
+        <mxCell id="lc3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#4a9eed;strokeWidth=1.5;endArrow=block;exitX=0.5;exitY=1;entryX=0.35;entryY=0;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="c3" target="tb">
+          <mxGeometry relative="1" as_="geometry"/>
+        </mxCell>
+        <mxCell id="lc4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#f59e0b;strokeWidth=1.5;endArrow=block;exitX=0.95;exitY=0;entryX=0.5;entryY=1;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="c4" target="srv">
+          <mxGeometry relative="1" as_="geometry"/>
+        </mxCell>
+        <mxCell id="lc5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#f59e0b;strokeWidth=1.5;endArrow=block;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitDx=0;exitDy=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="c5" target="mot">
+          <mxGeometry relative="1" as_="geometry"/>
+        </mxCell>
+        <mxCell id="capnote" value="全部电容负脚 -&amp;gt; 共地点" style="text;html=1;fontColor=#15803d;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="30" y="580" width="220" height="24" as_="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
