@@ -43,6 +43,10 @@ pub const EV_SESSION: u8 = 9;
 pub const EV_READ_ERR: u8 = 10;
 /// No reports for long enough that the session was abandoned.
 pub const EV_STALE: u8 = 11;
+/// First report of a session that parsed (proves reports are arriving).
+pub const EV_FIRST_REPORT: u8 = 12;
+/// First report of a session that did *not* parse, with len + header bytes.
+pub const EV_PARSE_FAIL: u8 = 13;
 
 /// Copies `fmt` output into a fixed buffer, truncating on a char boundary.
 struct TextSink<'a> {

@@ -477,6 +477,10 @@ async fn main(_spawner: Spawner) -> ! {
                         let mut buf = [0u8; 64];
                         let mut last_log = Instant::now();
                         let mut last_report = Instant::now();
+                        // Diagnostics: prove whether reports arrive at all, and
+                        // whether they parse (each logged once per session).
+                        let mut first_report_logged = false;
+                        let mut parse_fail_logged = false;
 
                         loop {
                             match embassy_time::with_timeout(
@@ -490,6 +494,13 @@ async fn main(_spawner: Spawner) -> ! {
                                     let dt_us = (now - last_report).as_micros();
                                     last_report = now;
                                     if let Some(gp) = GamepadState::parse(&buf[..n]) {
+                                        if !first_report_logged {
+                                            first_report_logged = true;
+                                            log.record(
+                                                flash_log::EV_FIRST_REPORT,
+                                                format_args!("n={}", n),
+                                            );
+                                        }
                                             drive(
                                                 &gp,
                                                 &mut steering,
@@ -508,6 +519,17 @@ async fn main(_spawner: Spawner) -> ! {
                                             );
                                             last_log = Instant::now();
                                         }
+                                    } else if !parse_fail_logged {
+                                        // Reports arrive but the layout is not the
+                                        // one this firmware knows (which mode is
+                                        // the receiver in?).
+                                        parse_fail_logged = true;
+                                        let b0 = *buf.first().unwrap_or(&0);
+                                        let b1 = *buf.get(1).unwrap_or(&0);
+                                        log.record(
+                                            flash_log::EV_PARSE_FAIL,
+                                            format_args!("n={} b0={:02x} b1={:02x}", n, b0, b1),
+                                        );
                                     }
                                 }
                                 Ok(Ok(_)) => {}

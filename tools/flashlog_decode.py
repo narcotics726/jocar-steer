@@ -30,6 +30,8 @@ KINDS = {
     9: "SESSION",
     10: "READ_ERR",
     11: "STALE",
+    12: "FIRST_REPORT",
+    13: "PARSE_FAIL",
 }
 
 
