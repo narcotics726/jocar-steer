@@ -49,6 +49,16 @@
 //! Then: the smallest pulse that reliably turns the wheels, and which way →
 //! `neutral_us`, `forward_span_us`.
 //!
+//! **E. Reverse-protocol probe (G1)** — three patterns, one per candidate
+//! protocol: a deep pulse straight from neutral; forward → neutral → deep pulse;
+//! and forward → first-sub-neutral-pulse (brake) → neutral → sub-neutral again.
+//! *Criterion:* which pattern produces reverse at all, plus two readouts the code
+//! cannot get — the ESC's own LED (lit = it is driving *something*, off = it
+//! reads the pulse as neutral) and the wheels by hand (braked = a brake, free =
+//! neutral). This runs before C because the first bench run produced no reverse
+//! under either of the first two patterns, and in that state a dwell sweep
+//! measures nothing.
+//!
 //! **C. Reverse-latch dwell sweep (G1)** — forward 1650 µs (2 s) → neutral for T
 //! → reverse (1.5 s) → neutral (2 s), for T = 100…400 ms and for **two** reverse
 //! magnitudes (1400 and 1200 µs).
@@ -56,7 +66,8 @@
 //! otherwise "the latch is still held" cannot be told apart from "the reverse
 //! pulse is too small" — and this class of ESC often has a shorter reverse range.
 //! The firmware holds demand-side neutral for `ControlConfig::reverse_coast_ms`;
-//! this section measures how long that has to be (with margin).
+//! this section measures how long that has to be (with margin). It runs *after*
+//! section E, because it only means something once reverse is known to engage.
 //!
 //! **D. Park** — both channels to 1500 µs. Never leave the tool with a throttle
 //! still commanded.
@@ -140,7 +151,50 @@ async fn esc_arm_and_probe<C: ChannelHW>(esc: &mut C) {
     }
 }
 
+/// E. Which reverse protocol does this ESC speak?
+///
+/// First run showed *no* reverse under either "cold" or "forward → neutral →
+/// below-neutral", which is exactly the case the plan says not to blame on the
+/// firmware. Three candidate protocols, one pattern each. The operator has two
+/// readouts the code cannot get: the ESC's own LED (lit = the ESC is driving
+/// *something*, off = it reads the pulse as neutral) and the wheels by hand.
+#[allow(
+    clippy::large_stack_frames,
+    reason = "same per-step console formatting as the servo sweep"
+)]
+async fn reverse_protocol_probe<C: ChannelHW>(esc: &mut C) {
+    info!("E. reverse protocol on G1 — for every pulse below neutral, watch the ESC LED");
+    info!("   and try turning the wheels by hand: braked = the ESC IS driving (a brake),");
+    info!("   free = it reads neutral, turning backwards = reverse.");
+
+    // E1: a deep pulse straight from neutral, no forward demand before it.
+    // Distinguishes "the reverse range starts lower than we probed" from
+    // "a below-neutral demand is not reverse at all".
+    hold(esc, NEUTRAL_US, 2000, "neutral").await;
+    hold(esc, 1050, 2500, "E1 deep pulse from neutral — reverse? LED? braked?").await;
+    hold(esc, NEUTRAL_US, 2000, "neutral").await;
+
+    // E2: forward, brief neutral, then a deep pulse. Same shape as section C but
+    // at the far end of the reverse range.
+    hold(esc, 1700, 2000, "E2 forward").await;
+    hold(esc, NEUTRAL_US, 500, "neutral").await;
+    hold(esc, 1050, 2500, "E2 deep pulse after forward+neutral — reverse? LED? braked?").await;
+    hold(esc, NEUTRAL_US, 2000, "neutral").await;
+
+    // E3: the double-tap / brake-then-reverse pattern. On an ESC whose first
+    // sub-neutral demand *is* the brake, this is the only pattern that reaches
+    // reverse — and section C never produces it.
+    hold(esc, 1700, 2000, "E3 forward").await;
+    hold(esc, 1400, 600, "E3 first sub-neutral pulse (the brake, if that is the protocol)").await;
+    hold(esc, NEUTRAL_US, 600, "E3 neutral (latch-release window)").await;
+    hold(esc, 1400, 2500, "E3 sub-neutral again — reverse NOW? LED? wheels?").await;
+    hold(esc, NEUTRAL_US, 2000, "neutral").await;
+}
+
 /// C. How long must neutral be held before a forward→reverse command works?
+///
+/// Run *after* section E: this sweep only means something once reverse is known
+/// to engage at all.
 #[allow(
     clippy::large_stack_frames,
     reason = "same per-step console formatting as the servo sweep"
@@ -240,6 +294,7 @@ async fn main(_spawner: Spawner) -> ! {
 
     servo_sweep(&mut servo_ch).await;
     esc_arm_and_probe(&mut esc_ch).await;
+    reverse_protocol_probe(&mut esc_ch).await;
     reverse_dwell_sweep(&mut esc_ch).await;
 
     // D. Park. Never leave a throttle commanded.
