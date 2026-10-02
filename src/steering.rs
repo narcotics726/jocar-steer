@@ -61,6 +61,10 @@ pub struct Steering<Ch> {
     target_deg: i32,
     /// Angle actually written to the channel; slewed toward `target_deg`.
     current_deg: i32,
+    /// Sub-degree slew credit, in 1e-6 deg. A slow rate (e.g. 242 °/s) covers
+    /// only a fraction of a degree per report (~1 ms apart), so without this
+    /// accumulator the integer step truncates to zero and the servo freezes.
+    slew_residual: i64,
 }
 
 impl<Ch: ChannelHW> Steering<Ch> {
@@ -82,6 +86,7 @@ impl<Ch: ChannelHW> Steering<Ch> {
             trim_deg: 0,
             target_deg: 0,
             current_deg: 0,
+            slew_residual: 0,
         };
         this.apply();
         this
@@ -94,6 +99,7 @@ impl<Ch: ChannelHW> Steering<Ch> {
     pub fn set_angle(&mut self, deg: i32) {
         self.target_deg = deg.clamp(-self.max_deg, self.max_deg);
         self.current_deg = self.target_deg;
+        self.slew_residual = 0;
         self.apply();
     }
 
@@ -108,14 +114,28 @@ impl<Ch: ChannelHW> Steering<Ch> {
     /// Move `current_deg` toward `target_deg` by at most `rate_deg_s × dt`,
     /// then write the channel. `dt_us` is the elapsed time since the previous
     /// call, in microseconds.
+    ///
+    /// The travel budget accumulates in 1e-6 deg so a rate that covers less
+    /// than a whole degree per call still makes progress instead of truncating
+    /// to zero.
     pub fn update(&mut self, rate_deg_s: i32, dt_us: u64) {
-        let max_step = (rate_deg_s as i64 * dt_us as i64 / 1_000_000)
-            .clamp(0, i32::MAX as i64) as i32;
-        let delta = (self.target_deg - self.current_deg).clamp(-max_step, max_step);
-        if delta != 0 {
-            self.current_deg += delta;
-            self.apply();
+        let err = self.target_deg - self.current_deg;
+        if err == 0 {
+            self.slew_residual = 0;
+            return;
         }
+        self.slew_residual += rate_deg_s as i64 * dt_us as i64;
+        let budget = (self.slew_residual / 1_000_000).clamp(0, i32::MAX as i64) as i32;
+        if budget == 0 {
+            return; // not enough accumulated time for a whole degree yet
+        }
+        let delta = err.clamp(-budget, budget);
+        self.slew_residual -= delta.abs() as i64 * 1_000_000;
+        self.current_deg += delta;
+        if self.current_deg == self.target_deg {
+            self.slew_residual = 0; // reached the goal; drop stale credit
+        }
+        self.apply();
     }
 
     /// Return the servo to the trimmed center position (equivalent to

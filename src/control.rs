@@ -113,7 +113,9 @@ pub fn motor_diff(ly: u8, rx: u8, deadzone: i32, max_duty: i32) -> (i32, i32) {
 /// 1. **Slew-rate**: the change per call is capped at `rate_per_s × dt`, so the
 ///    limit is expressed in physical time and is independent of how often the
 ///    control loop runs (or how fast reports arrive). The previous per-tick
-///    formulation silently scaled with the report rate.
+///    formulation silently scaled with the report rate. The sub-unit remainder
+///    is carried across calls: a rate that covers less than one unit per call
+///    must still advance, or it truncates to zero and the motor freezes.
 /// 2. **Coast-before-reverse**: when the sign flips the output is forced to 0
 ///    for one call so the driver coasts (TB6612: IN1=IN2=0) rather than
 ///    reversing abruptly.
@@ -124,6 +126,9 @@ pub struct MotorSlew {
     last_r: i32,
     /// Maximum speed change per second (abstract speed units/s).
     rate_per_s: i32,
+    /// Sub-unit slew credit per channel, in 1e-6 speed units.
+    residual_l: i64,
+    residual_r: i64,
 }
 
 impl MotorSlew {
@@ -134,6 +139,8 @@ impl MotorSlew {
             last_l: 0,
             last_r: 0,
             rate_per_s,
+            residual_l: 0,
+            residual_r: 0,
         }
     }
 
@@ -141,16 +148,30 @@ impl MotorSlew {
     /// (`dt_us`, microseconds), apply slew + reverse protection, and return the
     /// values that should actually be written to the motor driver.
     pub fn update(&mut self, target_l: i32, target_r: i32, dt_us: u64) -> (i32, i32) {
-        // Layer 1: time-based slew limit — the most we may move is rate × dt.
-        let max_delta = (self.rate_per_s as i64 * dt_us as i64 / 1_000_000)
-            .clamp(0, i32::MAX as i64) as i32;
-        let slew = |target: i32, current: &mut i32| {
-            let delta = (target - *current).clamp(-max_delta, max_delta);
+        // Layer 1: time-based slew limit — the most we may move is rate × dt,
+        // with any sub-unit remainder carried over to the next call.
+        let rate = self.rate_per_s;
+        let slew = |target: i32, current: &mut i32, residual: &mut i64| {
+            let err = target - *current;
+            if err == 0 {
+                *residual = 0;
+                return *current;
+            }
+            *residual += rate as i64 * dt_us as i64;
+            let budget = (*residual / 1_000_000).clamp(0, i32::MAX as i64) as i32;
+            if budget == 0 {
+                return *current; // not enough accumulated time for one unit yet
+            }
+            let delta = err.clamp(-budget, budget);
+            *residual -= delta.abs() as i64 * 1_000_000;
             *current += delta;
+            if *current == target {
+                *residual = 0; // reached the goal; drop stale credit
+            }
             *current
         };
-        let l = slew(target_l, &mut self.current_l);
-        let r = slew(target_r, &mut self.current_r);
+        let l = slew(target_l, &mut self.current_l, &mut self.residual_l);
+        let r = slew(target_r, &mut self.current_r, &mut self.residual_r);
 
         // Layer 2: coast-before-reverse
         let protect = |cmd: i32, last: i32| {
@@ -174,5 +195,7 @@ impl MotorSlew {
         self.current_r = 0;
         self.last_l = 0;
         self.last_r = 0;
+        self.residual_l = 0;
+        self.residual_r = 0;
     }
 }
