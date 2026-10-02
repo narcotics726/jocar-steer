@@ -9,7 +9,9 @@
 ```bash
 cargo build                    # Debug build
 cargo build --release          # Release build
-cargo run                      # Build + flash via espflash over TTL port (auto-detected)
+cargo run                      # Build + flash the main car via espflash over TTL (auto-detected)
+cargo run --bin rc10           # The 1/10 car firmware (same runner, different bin)
+cargo run --bin servo-test     # 50 Hz pulse calibration tool — WHEELS OFF THE GROUND
 cargo test                     # Alias to `cargo build` (no test harness; all verification is on-device)
 ```
 
@@ -27,14 +29,15 @@ cargo test                     # Alias to `cargo build` (no test harness; all ve
 - **OTG port** (GPIO19/20, native USB) → reserved for the USB host gamepad receiver; USB-Serial/JTAG is unavailable while OTG is active
 - The ESP32-S3 has a single USB PHY shared between USB-Serial/JTAG and USB OTG — they cannot be active at the same time. Hold BOOT at reset to enter download mode if auto-reset wiring is missing.
 
-## Current car hardware (2026-08)
+## Cars
 
-- **Board:** HW678 (white-label ESP32-S3 DevKitC-1 clone, WROOM-1 octal module); powered by a 5 V buck from the battery into 5VIN
-- **Battery:** 2S 7.4 V LiPo → TB6612 VM direct
-- **Motor:** 12 V-rated N30 4000 RPM, single rear drive (no differential); TB6612 channel A
-- **Servo:** SG90 · **Gamepad:** ZD receiver on the native USB port (OTG)
-- **Pin map:** `docs/wiring.md` (per chassis — the 1/10 car differs)
-- **Control tuning:** steer ±30° + steer-throttle mix (50 % cut at full lock); full duty (4095) is safe — the motor is 12 V-rated, so 2S is under-voltage, and heat comes from stall current, not voltage
+Both cars run the same core (input session → chassis policy → motor driver); each bin owns its pin map, chassis parameters and peripherals.
+
+**jocar** — 2S → 5 V buck → board 5VIN, 2S direct → TB6612 VM. 12 V-rated N30 4000 RPM, single rear drive (no differential), TB6612 channel A. SG90 servo. Pin map: `docs/wiring.md`.
+Durable criterion: **full duty is safe** — the motor is 12 V-rated, so 2S is under-voltage, and heat comes from stall current, not voltage. The steer-throttle mix is what keeps that stall current down (without a differential the front wheels scrub through turns).
+
+**1/10 car** (`rc10` bin) — 2S → buck A (≥3 A) → MG996R servo, 2S → buck B → board 5VIN, 2S direct → ESC (G1). Brushed 540 + BDESC-S10E-RTR. **The ESC's BEC stays disconnected** (a 1.5–2.5 A servo stall on a 2 A BEC can reset the ESC itself).
+Durable criteria: **neutral is a command, not silence** — duty 0 reads as "no signal" to an ESC, so `stop()` keeps pulsing neutral; the throttle channel must carry **no residual above neutral** (hence mix off and kick off) or the ESC never detects neutral and reverse never engages; endpoints and the pre-reverse neutral dwell are calibration inputs, not guesses (procedure: plan §3; tool: `servo-test`).
 
 ## Architecture
 
