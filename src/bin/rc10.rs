@@ -237,18 +237,24 @@ async fn main(_spawner: Spawner) -> ! {
         kick_duration_ms: 0,
         kick_min_num: 3,
         kick_min_den: 10,
-        // The ESC's reverse protocol, measured on the bench (servo-test F). It is
-        // *three* phases, not two: after a forward demand the first sub-neutral
-        // pulse is a brake, and only a second one — after neutral — is reverse.
+        // The ESC's reverse protocol, measured on the bench (servo-test F/G). It
+        // is *three* phases, not two: after a forward demand the first
+        // sub-neutral pulse is a brake, and only a second one — after neutral —
+        // is reverse.
         //   no brake pulse + 600 ms neutral + reverse → nothing
-        //   400 ms brake  + 600 ms neutral + reverse → reverse, at every depth
-        //                                                from 1450 down to 1050 µs
-        // The brake pulse is the 1400 µs that F1 used, expressed as a speed so a
+        //   400 ms brake  + 600 ms neutral + reverse → reverse at every depth
+        //                                              from 1450 down to 1050 µs
+        //   100 ms brake  + 600 ms neutral + reverse → reverse (50 ms: nothing)
+        //   all brake durations tested + 50 ms neutral → reverse
+        // So the measured minimums are brake ≤100 ms and neutral ≤50 ms; the
+        // values below carry a margin because "too short" fails as *no reverse
+        // at all*, which is the most confusing failure this car can produce.
+        // The brake pulse is the 1400 µs that F1 used (a *shallow* one — its
+        // depth does not need to follow the stick), expressed as a speed so a
         // change to the spans above cannot leave it in the wrong place.
-        // Both durations are the measured-working values, not minimums.
         reversal_brake_speed: esc_cfg.speed_for_pulse(1400),
-        reversal_brake_ms: 400,
-        reversal_neutral_ms: 600,
+        reversal_brake_ms: 150,
+        reversal_neutral_ms: 100,
         // Full throttle for 2 s is ~16 m on this car; this is a safety limit.
         failsafe_timeout_ms: 2000,
     };
