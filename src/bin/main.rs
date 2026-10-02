@@ -251,7 +251,10 @@ async fn main(_spawner: Spawner) -> ! {
     // src/flash_log.rs. Created before the USB host starts so the flash access
     // (cache and interrupts disabled) cannot disturb USB timing.
     let mut log = flash_log::FlashLog::new(esp_storage::FlashStorage::new(peripherals.FLASH));
-    log.record(flash_log::EV_BOOT, format_args!("boot"));
+    log.record(
+        flash_log::EV_BOOT,
+        format_args!("boot {:?}", esp_hal::system::reset_reason()),
+    );
     log.dump();
 
     // ── Servo on GPIO14 via LEDC (50 Hz) ─────────────────────────────
@@ -455,10 +458,20 @@ async fn main(_spawner: Spawner) -> ! {
                     enum_info.device_desc.vendor_id,
                     enum_info.device_desc.product_id
                 );
+                log.record(
+                    flash_log::EV_ENUM_OK,
+                    format_args!(
+                        "vid={:04x} pid={:04x}",
+                        enum_info.device_desc.vendor_id,
+                        enum_info.device_desc.product_id
+                    ),
+                );
 
                 match GamepadHost::new(&bus, &config_buf[..config_len], &enum_info) {
                     Ok(h) => {
                         let mut hid = h;
+                        log.record(flash_log::EV_IFACE, format_args!("iface0 ok"));
+                        log.record(flash_log::EV_SESSION, format_args!("direct reading"));
                         info!("iface0 ready — reading gamepad reports");
 
                         let mut buf = [0u8; 64];
@@ -500,11 +513,16 @@ async fn main(_spawner: Spawner) -> ! {
                                 Ok(Ok(_)) => {}
                                 Ok(Err(e)) => {
                                     error!("HID read failed: {:?}", e);
+                                    log.record(flash_log::EV_READ_ERR, format_args!("{:?}", e));
                                     break;
                                 }
                                 Err(_) => {
                                     if last_report.elapsed() >= Duration::from_secs(5) {
                                         error!("no reports for 5s — device gone?");
+                                        log.record(
+                                            flash_log::EV_STALE,
+                                            format_args!("no reports 5s"),
+                                        );
                                         break;
                                     }
                                 }
@@ -517,12 +535,18 @@ async fn main(_spawner: Spawner) -> ! {
                         log.record(flash_log::EV_LOST, format_args!("direct device gone"));
                         info!("Device disconnected, waiting for next");
                     }
-                    Err(_) => {
+                    Err(e) => {
                         // Not a ZD receiver — try registering it as a hub and
                         // service downstream ports.
+                        log.record(flash_log::EV_IFACE, format_args!("no iface: {:?}", e));
                         info!("no direct gamepad — trying hub");
+                        log.record(flash_log::EV_HUB, format_args!("registering"));
                         match HubHandler::<_, 8>::try_register(&bus, &enum_info).await {
                             Ok(mut hub) => {
+                                log.record(
+                                    flash_log::EV_HUB,
+                                    format_args!("registered, waiting for events"),
+                                );
                                 info!("hub registered");
 
                                 loop {
@@ -553,6 +577,13 @@ async fn main(_spawner: Spawner) -> ! {
                                                     ) {
                                                         Ok(h) => {
                                                             let mut hid = h;
+                                                            log.record(
+                                                                flash_log::EV_SESSION,
+                                                                format_args!(
+                                                                    "hub{} reading",
+                                                                    port
+                                                                ),
+                                                            );
                                                             info!(
                                                                 "iface0 ready on hub port {}",
                                                                 port
@@ -684,6 +715,10 @@ async fn main(_spawner: Spawner) -> ! {
                             }
                             Err(e) => {
                                 error!("hub register failed: {:?}", e);
+                                log.record(
+                                    flash_log::EV_HUB,
+                                    format_args!("reg failed: {:?}", e),
+                                );
                                 Timer::after(Duration::from_millis(500)).await;
                             }
                         }

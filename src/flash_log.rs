@@ -31,6 +31,18 @@ pub const EV_CONNECTED: u8 = 2;
 pub const EV_ENUM_FAIL: u8 = 3;
 pub const EV_LOST: u8 = 4;
 pub const EV_RESET: u8 = 5;
+/// Enumeration succeeded (device identified).
+pub const EV_ENUM_OK: u8 = 6;
+/// `GamepadHost::new` result — decides gamepad path vs hub fallback.
+pub const EV_IFACE: u8 = 7;
+/// Hub fallback milestones (registering / registered / failed / waiting).
+pub const EV_HUB: u8 = 8;
+/// A gamepad read session started (direct or behind a hub).
+pub const EV_SESSION: u8 = 9;
+/// A HID read failed.
+pub const EV_READ_ERR: u8 = 10;
+/// No reports for long enough that the session was abandoned.
+pub const EV_STALE: u8 = 11;
 
 /// Copies `fmt` output into a fixed buffer, truncating on a char boundary.
 struct TextSink<'a> {

@@ -24,6 +24,12 @@ KINDS = {
     3: "ENUM_FAIL",
     4: "LOST",
     5: "RESET",
+    6: "ENUM_OK",
+    7: "IFACE",
+    8: "HUB",
+    9: "SESSION",
+    10: "READ_ERR",
+    11: "STALE",
 }
 
 
