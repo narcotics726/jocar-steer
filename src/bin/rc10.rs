@@ -76,8 +76,11 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 const MOTOR_MAX_SPEED: i32 = 4095;
 
 /// Static center offset in degrees to cancel residual servo mounting error.
-/// Calibrate on the car (procedure: `servo-test`, then trim by eye).
-const CENTER_TRIM_DEG: i32 = 0;
+///
+/// Bench-measured: at 1500 µs the wheels sat slightly right, and the front
+/// tie-rod was re-adjusted mechanically, leaving a very slight offset. 2° to the
+/// left (~11 µs) is the residual; nudge by ±1° if it still reads off on the car.
+const CENTER_TRIM_DEG: i32 = 2;
 
 #[allow(
     clippy::large_stack_frames,

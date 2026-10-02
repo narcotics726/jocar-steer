@@ -72,9 +72,10 @@
 //! **D. Park** — both channels to 1500 µs. Never leave the tool with a throttle
 //! still commanded.
 //!
-//! Sections A and C are switched by the two `RUN_*` constants below `NEUTRAL_US`:
-//! A wears the steering linkage against its stop, and C assumes a reverse
-//! protocol that section E has to establish first.
+//! Sections A, C, E and F are switched by the `RUN_*` constants below
+//! `NEUTRAL_US`: A wears the steering linkage against its stop, C assumes a
+//! reverse protocol that E has to establish first, E has already identified that
+//! protocol, and F is the current question (minimal recipe + accepted depths).
 
 use defmt::info;
 use embassy_executor::Spawner;
@@ -110,6 +111,14 @@ const RUN_SERVO_SWEEP: bool = false;
 /// "forward → neutral → below-neutral". Leave it off until section E has shown
 /// which protocol this ESC actually speaks — otherwise it is 45 s of nothing.
 const RUN_DWELL_SWEEP: bool = false;
+
+/// Section E (which reverse protocol?) has answered: the brake-then-reverse
+/// pattern reaches reverse, and so does a cold start. Off by default now.
+const RUN_PROTOCOL_PROBE: bool = false;
+
+/// Section F (what is the *minimal* recipe, and which depths are accepted?) is
+/// the current question.
+const RUN_RECIPE_PROBE: bool = true;
 
 /// Set a pulse and hold it, announcing the value on the console (the console is
 /// the only readout: there is no input device attached to this tool).
@@ -203,6 +212,53 @@ async fn reverse_protocol_probe<C: ChannelHW>(esc: &mut C) {
     hold(esc, NEUTRAL_US, 600, "E3 neutral (latch-release window)").await;
     hold(esc, 1400, 2500, "E3 sub-neutral again — reverse NOW? LED? wheels?").await;
     hold(esc, NEUTRAL_US, 2000, "neutral").await;
+}
+
+/// F. What is the *minimal* reverse recipe, and which pulse depths are accepted?
+///
+/// Established by the first two bench runs:
+/// - 1400 µs from a fresh arm reverses (so the plan's prediction holds: the
+///   direction latch is set by a forward *demand*, and arming sends none);
+/// - 1050 µs never reversed, in any shape;
+/// - "forward → neutral(≤400 ms) → 1400" (the first run's gate sweep) did not,
+///   while "forward → 1400 → neutral(600 ms) → 1400" did.
+///
+/// So two things are still confounded — the extra sub-neutral pulse (a brake, if
+/// that is the protocol) and the longer neutral window — and one thing is
+/// unknown but load-bearing: the band of depths the ESC accepts as reverse. The
+/// firmware's planned full-reverse pulse is 1150 µs, which may sit outside it.
+#[allow(
+    clippy::large_stack_frames,
+    reason = "same per-step console formatting as the servo sweep"
+)]
+async fn reverse_recipe_probe<C: ChannelHW>(esc: &mut C) {
+    info!("F. reverse recipe on G1 — note WHICH of these reverses; any motion counts");
+
+    // F2 first: if the brake pulse turns out to be unnecessary, the firmware
+    // needs no three-phase state machine at all — only a longer neutral window.
+    for (brake_ms, label) in [
+        (0u64, "F2a NO brake pulse, 600 ms neutral — does the longer window alone do it?"),
+        (150, "F2b brake pulse 150 ms + 600 ms neutral — and this one?"),
+    ] {
+        hold(esc, 1700, 2000, "forward (sets the latch)").await;
+        if brake_ms > 0 {
+            hold(esc, 1400, brake_ms, "brake pulse").await;
+        }
+        hold(esc, NEUTRAL_US, 600, "neutral (the latch window)").await;
+        hold(esc, 1400, 2000, label).await;
+        hold(esc, NEUTRAL_US, 1500, "neutral").await;
+    }
+
+    // F1: which depths are accepted? The gate is the one that has worked
+    // (1400 for 400 ms, then 600 ms neutral).
+    info!("F1 depth sweep — gate: 1400 for 400 ms, then 600 ms neutral");
+    for probe in [1450u32, 1400, 1350, 1300, 1250, 1200, 1150, 1100, 1050] {
+        hold(esc, 1700, 2000, "forward").await;
+        hold(esc, 1400, 400, "brake").await;
+        hold(esc, NEUTRAL_US, 600, "neutral").await;
+        hold(esc, probe, 1500, "probe: does THIS depth reverse?").await;
+        hold(esc, NEUTRAL_US, 1500, "neutral").await;
+    }
 }
 
 /// C. How long must neutral be held before a forward→reverse command works?
@@ -312,7 +368,14 @@ async fn main(_spawner: Spawner) -> ! {
         info!("(section A skipped: RUN_SERVO_SWEEP = false — servo already measured)");
     }
     esc_arm_and_probe(&mut esc_ch).await;
-    reverse_protocol_probe(&mut esc_ch).await;
+    if RUN_PROTOCOL_PROBE {
+        reverse_protocol_probe(&mut esc_ch).await;
+    } else {
+        info!("(section E skipped: RUN_PROTOCOL_PROBE = false — protocol already identified)");
+    }
+    if RUN_RECIPE_PROBE {
+        reverse_recipe_probe(&mut esc_ch).await;
+    }
     if RUN_DWELL_SWEEP {
         reverse_dwell_sweep(&mut esc_ch).await;
     } else {
