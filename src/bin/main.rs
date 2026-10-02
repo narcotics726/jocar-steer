@@ -34,7 +34,7 @@ use embassy_executor::Spawner;
 use esp_hal::clock::CpuClock;
 use esp_hal::gpio::DriveMode;
 use esp_hal::ledc::{
-    LSGlobalClkSource, Ledc, LowSpeed,
+    Ledc, LowSpeed,
     channel::{self, ChannelIFace},
     timer::{self, TimerIFace},
 };
@@ -45,6 +45,7 @@ use esp_hal::usb::otg::{Usb, embassy_usb_host::Driver};
 use jocar_steer::chassis::Chassis;
 use jocar_steer::control;
 use jocar_steer::flash_log;
+use jocar_steer::rc_pwm;
 use jocar_steer::steering::Steering;
 use jocar_steer::tb6612::Tb6612Single;
 use jocar_steer::usb_session::UsbSession;
@@ -124,16 +125,12 @@ async fn main(_spawner: Spawner) -> ! {
 
     // ── Servo on GPIO14 via LEDC (50 Hz) ─────────────────────────────
     let mut ledc = Ledc::new(peripherals.LEDC);
-    ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
+    rc_pwm::init(&mut ledc);
 
     let mut lstimer = ledc.timer::<LowSpeed>(timer::Number::Timer0);
-    lstimer
-        .configure(timer::config::Config {
-            duty: timer::config::Duty::Duty12Bit,
-            clock_source: timer::LSClockSource::APBClk,
-            frequency: Rate::from_hz(50),
-        })
-        .unwrap();
+    // Frequency and resolution come from the shared RC-pulse module so the
+    // timer and the pulse→counts conversion cannot disagree (see rc_pwm).
+    lstimer.configure(rc_pwm::timer_config()).unwrap();
 
     let servo_pin = peripherals.GPIO14;
     let mut ch = ledc.channel(channel::Number::Channel0, servo_pin);
@@ -148,6 +145,9 @@ async fn main(_spawner: Spawner) -> ! {
     // NOTE: Timer1 and Channel2 were found to produce no output on this
     // setup, so the motor uses Timer2 + Channel1 (same as the archived PS2
     // firmware did).
+    // 12-bit is load-bearing here: `Tb6612Single` writes abstract speed 1:1 as
+    // raw counts clamped to ±4095, and `ControlConfig::motor_max_speed` is that
+    // same full scale. Changing the resolution means changing all three.
     let mut motor_timer = ledc.timer::<LowSpeed>(timer::Number::Timer2);
     motor_timer
         .configure(timer::config::Config {
@@ -191,6 +191,10 @@ async fn main(_spawner: Spawner) -> ! {
         kick_duration_ms: 0,
         kick_min_num: 3,
         kick_min_den: 10, // kick only above 30 % throttle
+        // Short H-bridge coast on a direction reversal. This used to be "one
+        // call", i.e. the last per-tick quantity in the control path; 5 ms is
+        // the same thing expressed in time.
+        reverse_coast_ms: 5,
         // A lost link must not leave the car at its last throttle. 2 s at full
         // speed is already ~16 m on the 1/10 car, so this is a safety limit,
         // not a comfort setting.

@@ -48,6 +48,18 @@ pub struct ControlConfig {
     pub kick_min_num: i32,
     /// Denominator of the kick trigger ratio.
     pub kick_min_den: i32,
+    /// How long a *reversal* must hold exactly zero before the new direction is
+    /// allowed, in milliseconds. This is the actuator's direction-change
+    /// requirement, expressed in time (it used to be "one call", the last
+    /// per-tick quantity left in the control path):
+    ///
+    /// - TB6612: a few ms, so the H-bridge is not reversed instantaneously.
+    /// - latching brushed ESC: **the unit's neutral-dwell requirement**
+    ///   (hundredths of a second). Too short and reverse silently never
+    ///   engages — see the plan's boundary condition ①.
+    ///
+    /// `0` disables the hold entirely.
+    pub reverse_coast_ms: u64,
     /// Stop commanding the actuators after this long without an input report.
     pub failsafe_timeout_ms: u64,
 }
@@ -106,41 +118,107 @@ pub fn throttle_speed(ly: u8, steer_deg: i32, cfg: &ControlConfig) -> i32 {
 
 // ── Motor slew-rate limiter ───────────────────────────────────────────
 
-/// Stateful, time-based slew-rate limiter with coast-before-reverse protection.
+/// Stateful, time-based slew-rate limiter with a timed reversal hold.
 ///
-/// Two-layer protection:
+/// Three layers:
 /// 1. **Slew-rate**: the change per call is capped at `rate_per_s × dt`, so the
 ///    limit is expressed in physical time and is independent of how often the
 ///    control loop runs (or how fast reports arrive). The previous per-tick
 ///    formulation silently scaled with the report rate. The sub-unit remainder
 ///    is carried across calls: a rate that covers less than one unit per call
 ///    must still advance, or it truncates to zero and the motor freezes.
-/// 2. **Coast-before-reverse**: when the sign flips the output is forced to 0
-///    for one call so the driver coasts (TB6612: IN1=IN2=0) rather than
-///    reversing abruptly.
+/// 2. **Reversal hold**: when the *demanded* direction reverses, the output is
+///    forced to exactly zero and the ramp is frozen for
+///    [`ControlConfig::reverse_coast_ms`], after which the new direction ramps
+///    up from zero. It lives here rather than in a driver for two reasons: the
+///    actuator needs the gap (H-bridge coast; a latching ESC needs it to release
+///    its direction latch, or reverse never engages), and the *onset* of the new
+///    direction has to be a ramp rather than a step — holding neutral while the
+///    slew kept advancing would hand the actuator the already-completed target
+///    the moment the hold expires. It keys on the demand rather than on the
+///    output because the output lags the stick: a driver that tried to detect
+///    this from the value it is handed sees the ramp crossing zero and cannot
+///    tell "still reversing" from "operator already asked for forward", which is
+///    how a reverse burst ends up under a stick held at full forward.
+/// 3. **Direction memory**: the last non-zero direction survives both a stop and
+///    a passage through zero, so the hold can still be recognised after the
+///    throttle has been at rest.
 pub struct MotorSlew {
     current: i32,
-    last: i32,
+    /// Direction of the last non-zero output (-1 / 0 / +1); 0 = nothing driven
+    /// yet this power cycle.
+    last_dir: i32,
     /// Maximum speed change per second (abstract speed units/s).
     rate_per_s: i32,
     /// Sub-unit slew credit, in 1e-6 speed units.
     residual: i64,
+    /// Length of a reversal hold (µs).
+    reverse_coast_us: u64,
+    /// Time left in an in-progress hold; 0 = not holding.
+    hold_remaining_us: u64,
+    /// Direction the hold is currently denying (-1 / +1).
+    hold_dir: i32,
 }
 
 impl MotorSlew {
-    pub fn new(rate_per_s: i32) -> Self {
+    pub fn new(rate_per_s: i32, reverse_coast_ms: u64) -> Self {
         Self {
             current: 0,
-            last: 0,
+            last_dir: 0,
             rate_per_s,
             residual: 0,
+            reverse_coast_us: reverse_coast_ms * 1_000,
+            hold_remaining_us: 0,
+            hold_dir: 0,
         }
     }
 
+    /// Whether the limiter is currently denying a reversal (output is exactly
+    /// zero and the ramp is frozen).
+    ///
+    /// Callers must not override a hold with anything else — the hold is an
+    /// actuator requirement, and the start-kick in particular would otherwise
+    /// jump straight to full speed in the new direction.
+    pub fn holding(&self) -> bool {
+        self.hold_remaining_us > 0
+    }
+
     /// Take the target speed plus the elapsed time since the previous call
-    /// (`dt_us`, microseconds), apply slew + reverse protection, and return the
-    /// value that should actually be written to the motor driver.
+    /// (`dt_us`, microseconds), apply the layers above, and return the value
+    /// that should actually be written to the motor driver.
     pub fn update(&mut self, target: i32, dt_us: u64) -> i32 {
+        let target_dir = target.signum();
+
+        if self.hold_remaining_us > 0 {
+            // The demand changing direction again cancels the hold: it exists to
+            // deny one specific direction, and continuing it after the operator
+            // changed their mind would only add lag. Falling through ramps from
+            // `current` (already zero) toward the new target.
+            if target_dir != 0 && target_dir != self.hold_dir {
+                self.hold_remaining_us = 0;
+                self.hold_dir = 0;
+            } else {
+                self.hold_remaining_us = self.hold_remaining_us.saturating_sub(dt_us);
+                return 0;
+            }
+        }
+
+        // A reversal is a change of *demanded* direction after something has
+        // been driven (a fresh driver has no latch to release, which is why a
+        // car that has never driven forward gets reverse straight away).
+        if target_dir != 0
+            && self.last_dir != 0
+            && target_dir != self.last_dir
+            && self.reverse_coast_us > 0
+        {
+            self.hold_remaining_us = self.reverse_coast_us.saturating_sub(dt_us);
+            self.hold_dir = target_dir;
+            self.current = 0;
+            self.residual = 0;
+            self.last_dir = 0;
+            return 0;
+        }
+
         // Layer 1: time-based slew limit — the most we may move is rate × dt,
         // with any sub-unit remainder carried over to the next call.
         let err = target - self.current;
@@ -159,21 +237,22 @@ impl MotorSlew {
             }
         }
 
-        // Layer 2: coast-before-reverse
-        let cmd = if self.current.signum() * self.last.signum() < 0 && self.current != 0 {
-            0
-        } else {
-            self.current
-        };
-        self.last = cmd;
-        cmd
+        if self.current != 0 {
+            self.last_dir = self.current.signum();
+        }
+        self.current
     }
 
-    /// Reset all internal state to zero (call on stop / device disconnect).
+    /// Reset the ramp to zero (call on stop / device disconnect).
+    ///
+    /// The direction memory is deliberately **kept**: after a stop the
+    /// actuator's own direction latch still reflects what we last drove, so a
+    /// reverse command that follows a halt still gets its hold.
     pub fn reset(&mut self) {
         self.current = 0;
-        self.last = 0;
         self.residual = 0;
+        self.hold_remaining_us = 0;
+        self.hold_dir = 0;
     }
 }
 

@@ -12,6 +12,11 @@ path = "./src/bin/main.rs"
 test = false
 
 [[bin]]
+name = "rc10"
+path = "./src/bin/rc10.rs"
+test = false
+
+[[bin]]
 name = "ps2-test"
 path = "./src/bin/ps2_test.rs"
 test = false

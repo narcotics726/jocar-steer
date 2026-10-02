@@ -2,18 +2,72 @@
 #![no_main]
 #![deny(clippy::large_stack_frames)]
 
+//! 50 Hz RC pulse calibration tool — servo endpoints *and* ESC endpoints/dwell.
+//!
+//! ⚠ **Put the drive wheels off the ground before running this.** From section
+//! B on, it commands the ESC, and the motor will spin. If it panics it resets and
+//! starts the whole sequence again about 20 s later, so do not leave it
+//! unattended with the wheels down.
+//!
+//! Pins (both on LEDC Timer0, 50 Hz):
+//! - **G14** — steering servo channel (Ch0)
+//! - **G1** — ESC throttle channel (Ch1)
+//!
+//! Only the device being calibrated needs to be connected. Until its own section
+//! starts, the other channel emits **nothing** (duty 0), which is not the same as
+//! neutral: an ESC reads silence as "no signal". That is why section B's arming
+//! hold is the first thing the ESC ever sees from this tool.
+//!
+//! This tool is deliberately independent of the firmware's *drivers*
+//! ([`Steering`](jocar_steer::steering::Steering), [`Esc`](jocar_steer::esc::Esc)):
+//! it has to emit pulses those drivers would refuse to, and it must not inherit
+//! the deadzone and dwell logic it is being used to calibrate. It does share the
+//! RC-pulse timing with them, because that is about the LEDC hardware rather than
+//! about driver policy (see `jocar_steer::rc_pwm`).
+//!
+//! # What it does, and the criterion for each section
+//!
+//! **A. Servo sweep (G14)** — 1500 → 1000 → 2000 → 1500 µs in 50 µs steps, each
+//! step printed and held 400 ms, with only half a second at each end.
+//! *Criterion:* where does the horn reach the mechanical stop (buzzing = too
+//! far), and is 1500 µs really "wheels straight"? → `CENTER_TRIM_DEG` and
+//! `steer_max_deg` in the bin. Do not let it sit at a stop: a stalled servo is
+//! the one thing the local capacitor cannot save (plan §3.5).
+//!
+//! **B. ESC arm, then cold-start reverse, then forward probe (G1)** — neutral for
+//! 5 s (the arm hold), then *straight to reverse* for 1.5 s, then
+//! 1550/1600/1650/1700/1800 µs forward for 1 s each with 2 s of neutral in between.
+//! *Criterion:* does reverse engage **without any preceding forward command**?
+//! That is the plan's untested prediction (§3.3): the latch should be set by a
+//! forward *demand*, and arming sends none. If it does not engage here, the same
+//! is true in the firmware and a forward blip is the workaround to document.
+//! Then: the smallest pulse that reliably turns the wheels, and which way →
+//! `neutral_us`, `forward_span_us`.
+//!
+//! **C. Reverse-latch dwell sweep (G1)** — forward 1650 µs (2 s) → neutral for T
+//! → reverse (1.5 s) → neutral (2 s), for T = 100…400 ms and for **two** reverse
+//! magnitudes (1400 and 1200 µs).
+//! *Criterion:* the smallest T at which reverse engages. Two magnitudes because
+//! otherwise "the latch is still held" cannot be told apart from "the reverse
+//! pulse is too small" — and this class of ESC often has a shorter reverse range.
+//! The firmware holds demand-side neutral for `ControlConfig::reverse_coast_ms`;
+//! this section measures how long that has to be (with margin).
+//!
+//! **D. Park** — both channels to 1500 µs. Never leave the tool with a throttle
+//! still commanded.
+
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::gpio::DriveMode;
 use esp_hal::ledc::{
-    LSGlobalClkSource, Ledc, LowSpeed,
-    channel::{self, ChannelIFace, ChannelHW},
+    Ledc, LowSpeed,
+    channel::{self, ChannelHW, ChannelIFace},
     timer::{self, TimerIFace},
 };
-use esp_hal::time::Rate;
 use esp_println as _;
+use jocar_steer::rc_pwm::{self, pulse_to_counts};
 
 extern crate alloc;
 
@@ -22,31 +76,86 @@ esp_bootloader_esp_idf::esp_app_desc!();
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     defmt::error!("Panic: {}", defmt::Display2Format(info));
-    loop {}
+    esp_hal::system::software_reset()
 }
 
-// ── MG90S servo timing (50 Hz PWM, 12-bit LEDC duty) ─────────────────
-//
-// MG90S datasheet: 20 ms period; ~1.0 ms = -90°, 1.5 ms = 0°, ~2.0 ms = +90°.
-// Stay within 1000..=2000 µs to avoid hitting mechanical stops.
+const NEUTRAL_US: u32 = 1500;
 
-const PERIOD_US: u32 = 20_000;           // 50 Hz
-const DUTY_MAX: u32 = 1 << 12;           // 12-bit → 4096 counts/period
-const CENTER_US: i32 = 1500;             // 0° centre
-const US_PER_90DEG: i32 = 500;           // 500 µs per 90°
-
-fn angle_to_counts(deg: i32) -> u32 {
-    let deg = deg.clamp(-90, 90);
-    let pulse_us = (CENTER_US + deg * US_PER_90DEG / 90) as u32;
-    (DUTY_MAX * pulse_us) / PERIOD_US
+/// Set a pulse and hold it, announcing the value on the console (the console is
+/// the only readout: there is no input device attached to this tool).
+async fn hold<C: ChannelHW>(ch: &mut C, pulse_us: u32, ms: u64, what: &str) {
+    ch.set_duty_hw(pulse_to_counts(pulse_us));
+    info!("  {} µs  ({} ms)  {}", pulse_us, ms, what);
+    Timer::after(Duration::from_millis(ms)).await;
 }
 
-// ── Sweep step size & delay ───────────────────────────────────────────
-const SWEEP_STEP_DEG: i32 = 2;           // degrees per tick
-const TICK_MS: u64 = 15;                 // ~66 Hz update rate
-const PAUSE_MS: u64 = 1000;              // pause at each endpoint
+/// A. Servo endpoints. `what` labels the two ends of the travel.
+#[allow(
+    clippy::large_stack_frames,
+    reason = "per-step console formatting across a sweeping loop; this tool runs standalone \
+    (no USB stack, no control loop) so it has the stack to itself"
+)]
+async fn servo_sweep<C: ChannelHW>(ch: &mut C) {
+    info!("A. servo sweep on G14 — watch for the mechanical stop (buzzing = too far)");
+    hold(ch, NEUTRAL_US, 1500, "centre: are the wheels straight?").await;
 
-// ── Entry point ──────────────────────────────────────────────────────
+    let mut us = NEUTRAL_US;
+    while us > 1000 {
+        us -= 50;
+        hold(ch, us, 400, "").await;
+    }
+    hold(ch, 1000, 500, "short-pulse end — half a second only, do not stall it").await;
+
+    while us < 2000 {
+        us += 50;
+        hold(ch, us, 400, "").await;
+    }
+    hold(ch, 2000, 500, "long-pulse end — half a second only, do not stall it").await;
+
+    hold(ch, NEUTRAL_US, 1000, "back to centre").await;
+}
+
+/// B. Arm the ESC, test cold-start reverse, then find the smallest pulse that
+/// turns the wheels.
+#[allow(
+    clippy::large_stack_frames,
+    reason = "same per-step console formatting as the servo sweep"
+)]
+async fn esc_arm_and_probe<C: ChannelHW>(esc: &mut C) {
+    info!("B. ESC on G1 — arming hold first, then cold-start reverse, then forward");
+    hold(esc, NEUTRAL_US, 5000, "neutral: the ESC arms here (it should beep)").await;
+
+    // The plan's prediction, tested before any forward demand exists.
+    hold(esc, 1400, 1500, "COLD-START reverse: does it engage with no prior forward?").await;
+    hold(esc, NEUTRAL_US, 2000, "neutral").await;
+
+    for us in [1550, 1600, 1650, 1700, 1800] {
+        hold(esc, us, 1000, "forward probe: do the wheels turn?").await;
+        hold(esc, NEUTRAL_US, 2000, "neutral").await;
+    }
+}
+
+/// C. How long must neutral be held before a forward→reverse command works?
+#[allow(
+    clippy::large_stack_frames,
+    reason = "same per-step console formatting as the servo sweep"
+)]
+async fn reverse_dwell_sweep<C: ChannelHW>(esc: &mut C) {
+    info!("C. reverse latch on G1 — forward → neutral(T) → reverse, two magnitudes");
+    for reverse_us in [1400u32, 1200] {
+        info!(
+            "== reverse pulse {} µs (a too-small pulse looks the same as a held latch)",
+            reverse_us
+        );
+        for t in [100u64, 200, 300, 400] {
+            info!("-- T = {} ms: forward 2 s, neutral {} ms, reverse 1.5 s", t, t);
+            hold(esc, 1650, 2000, "forward").await;
+            hold(esc, NEUTRAL_US, t, "neutral (the dwell under test)").await;
+            hold(esc, reverse_us, 1500, "reverse: did it engage?").await;
+            hold(esc, NEUTRAL_US, 2000, "neutral").await;
+        }
+    }
+}
 
 #[allow(
     clippy::large_stack_frames,
@@ -54,7 +163,6 @@ const PAUSE_MS: u64 = 1000;              // pause at each endpoint
 )]
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
-
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
@@ -78,10 +186,6 @@ async fn main(_spawner: Spawner) -> ! {
     let _ = peripherals.GPIO36;
     let _ = peripherals.GPIO37;
 
-    // USB/JTAG
-    let _ = peripherals.GPIO19;
-    let _ = peripherals.GPIO20;
-
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
 
     let timg0 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
@@ -91,66 +195,42 @@ async fn main(_spawner: Spawner) -> ! {
 
     info!("servo-test: Embassy initialized");
 
-    // --- LEDC setup (50 Hz for MG90S) ---
     let mut ledc = Ledc::new(peripherals.LEDC);
-    ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
+    rc_pwm::init(&mut ledc);
 
     let mut lstimer = ledc.timer::<LowSpeed>(timer::Number::Timer0);
-    lstimer
-        .configure(timer::config::Config {
-            duty: timer::config::Duty::Duty12Bit,
-            clock_source: timer::LSClockSource::APBClk,
-            frequency: Rate::from_hz(50),
+    lstimer.configure(rc_pwm::timer_config()).unwrap();
+
+    let mut servo_ch = ledc.channel(channel::Number::Channel0, peripherals.GPIO14);
+    servo_ch
+        .configure(channel::config::Config {
+            timer: &lstimer,
+            duty_pct: 0,
+            drive_mode: DriveMode::PushPull,
         })
         .unwrap();
 
-    let servo_pin = peripherals.GPIO13;
-    let mut ch = ledc.channel(channel::Number::Channel0, servo_pin);
-    ch.configure(channel::config::Config {
-        timer: &lstimer,
-        duty_pct: 0,
-        drive_mode: DriveMode::PushPull,
-    })
-    .unwrap();
+    let mut esc_ch = ledc.channel(channel::Number::Channel1, peripherals.GPIO1);
+    esc_ch
+        .configure(channel::config::Config {
+            timer: &lstimer,
+            duty_pct: 0,
+            drive_mode: DriveMode::PushPull,
+        })
+        .unwrap();
 
-    info!("LEDC ready: Timer0 Ch0 → GPIO13 (MG90S servo)");
+    info!("LEDC ready: Timer0 50 Hz — Ch0 → G14 (servo), Ch1 → G1 (ESC)");
+    info!("WHEELS OFF THE GROUND. Starting in 3 s.");
+    Timer::after(Duration::from_millis(3000)).await;
 
-    info!("Starting MG90S sweep test (GPIO13) — 2 cycles, then park at centre");
+    servo_sweep(&mut servo_ch).await;
+    esc_arm_and_probe(&mut esc_ch).await;
+    reverse_dwell_sweep(&mut esc_ch).await;
 
-    let mut current: i32 = 0;
-
-    for cycle in 0..2 {
-        info!("cycle {} / 2", cycle + 1);
-
-        // ── Centre → Left limit ──
-        info!("→ sweeping to LEFT  (-90°)");
-        while current > -90 {
-            current = (current - SWEEP_STEP_DEG).max(-90);
-            ch.set_duty_hw(angle_to_counts(current));
-            Timer::after(Duration::from_millis(TICK_MS)).await;
-        }
-        Timer::after(Duration::from_millis(PAUSE_MS)).await;
-
-        // ── Left → Right limit ──
-        info!("→ sweeping to RIGHT (+90°)");
-        while current < 90 {
-            current = (current + SWEEP_STEP_DEG).min(90);
-            ch.set_duty_hw(angle_to_counts(current));
-            Timer::after(Duration::from_millis(TICK_MS)).await;
-        }
-        Timer::after(Duration::from_millis(PAUSE_MS)).await;
-
-        // ── Right → Centre ──
-        info!("→ returning to CENTRE (0°)");
-        while current > 0 {
-            current = (current - SWEEP_STEP_DEG).max(0);
-            ch.set_duty_hw(angle_to_counts(current));
-            Timer::after(Duration::from_millis(TICK_MS)).await;
-        }
-        Timer::after(Duration::from_millis(PAUSE_MS)).await;
-    }
-
-    info!("done — parked at centre");
+    // D. Park. Never leave a throttle commanded.
+    servo_ch.set_duty_hw(pulse_to_counts(NEUTRAL_US));
+    esc_ch.set_duty_hw(pulse_to_counts(NEUTRAL_US));
+    info!("done — both channels parked at 1500 µs. Record the values above.");
 
     loop {
         Timer::after(Duration::from_millis(1000)).await;

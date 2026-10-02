@@ -6,8 +6,10 @@
 pub mod battery;
 pub mod chassis;
 pub mod control;
+pub mod esc;
 pub mod flash_log;
 pub mod ps2;
+pub mod rc_pwm;
 pub mod steering;
 pub mod tb6612;
 pub mod usb_gamepad;

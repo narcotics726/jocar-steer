@@ -22,27 +22,27 @@
 
 use esp_hal::ledc::channel::ChannelHW;
 
-// --- SG90 servo timing (50 Hz PWM, 12-bit LEDC duty) ---
+use crate::rc_pwm::pulse_to_counts;
+
+// --- SG90 servo timing (50 Hz RC pulse, see `crate::rc_pwm`) ---
 // SG90 datasheet: 20 ms period; 1.0 ms = -90°, 1.5 ms = 0° (center), 2.0 ms = +90°.
 // Stay within 1000..=2000 µs — the theoretical 500/2400 µs limits slam the
 // mechanical stops (buzzing / overheating / gear damage).
-const PERIOD_US: u32 = 20_000; // 50 Hz
-const DUTY_MAX: u32 = 1 << 12; // 12-bit timer → 4096 counts per period
 const CENTER_US: i32 = 1500; // 0°
 const US_PER_90DEG: i32 = 500; // 90° swing = 500 µs from center
 
-/// Convert a servo angle in degrees (-90..=90) to a raw 12-bit LEDC duty count.
+/// Convert a servo angle in degrees (-90..=90) to a raw LEDC duty count.
 ///
 /// Reference values (for self-check):
 /// -   0° → 307
-/// - +90° → 410
-/// - -90° → 205
+/// - +90° → 409
+/// - -90° → 204
 /// - +60° → 375
 /// -  +3° → 310
 fn angle_to_counts(deg: i32) -> u32 {
     let deg = deg.clamp(-90, 90);
     let pulse_us = (CENTER_US + deg * US_PER_90DEG / 90) as u32;
-    (DUTY_MAX * pulse_us) / PERIOD_US
+    pulse_to_counts(pulse_us)
 }
 
 /// Steering servo abstraction: independent of input source.
