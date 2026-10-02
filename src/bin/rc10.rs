@@ -188,9 +188,11 @@ async fn main(_spawner: Spawner) -> ! {
         // forward runs from ~1550 µs up, and reverse is proportional from ~1450
         // down to at least 1050 µs.
         neutral_us: 1500,
-        // ~70 % of nominal span for the first runs. This is a deliberate cap,
-        // not a measured endpoint: raise it once the car has been driven.
-        forward_span_us: 350,
+        // First ground runs only: the measured forward band starts just above
+        // 1500 µs, so a full stick here is ~1750 µs ≈ half of nominal travel
+        // (4WD + 540 on 2S is already quick at that). Raise it once the car is
+        // predictable — 500 µs is the nominal full-throttle endpoint.
+        forward_span_us: 250,
         // The reverse band is at least 1450..1050, so full reverse
         // (neutral − 350 = 1150 µs) sits comfortably inside it.
         reverse_span_us: 350,
