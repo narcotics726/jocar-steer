@@ -10,8 +10,13 @@
 //! unattended with the wheels down.
 //!
 //! Pins (both on LEDC Timer0, 50 Hz):
-//! - **G14** — steering servo channel (Ch0)
-//! - **G1** — ESC throttle channel (Ch1)
+//! - **G14** — steering servo channel (Timer0/Ch0)
+//! - **G1** — ESC throttle channel (Timer0/Ch1)
+//!
+//! ⚠ **The throttle pin is currently moved to G13** (LEDC Timer2/Ch1), the other
+//! car's PWMA pin, because the adapter harness routes it there — see the swap
+//! note at the LEDC setup in `main`. It has to match `rc10.rs` or this tool
+//! drives a pin with nothing on it.
 //!
 //! Only the device being calibrated needs to be connected. Until its own section
 //! starts, the other channel emits **nothing** (duty 0), which is not the same as
@@ -210,16 +215,26 @@ async fn main(_spawner: Spawner) -> ! {
         })
         .unwrap();
 
-    let mut esc_ch = ledc.channel(channel::Number::Channel1, peripherals.GPIO1);
+    // Timer2/Ch1 → G13: the ESC throttle.
+    //
+    // **TEMPORARY PIN — must match `rc10.rs`.** The firmware's design pin is G1
+    // on Timer0/Ch1; G13 is the other car's PWMA pin, borrowed while its adapter
+    // harness is in use. If these two disagree the tool drives a pin with nothing
+    // on it and the throttle side looks dead. Moving back means changing this
+    // pin, this channel back to Timer0/Ch1, and `rc10.rs` with it.
+    let mut esc_timer = ledc.timer::<LowSpeed>(timer::Number::Timer2);
+    esc_timer.configure(rc_pwm::timer_config()).unwrap();
+
+    let mut esc_ch = ledc.channel(channel::Number::Channel1, peripherals.GPIO13);
     esc_ch
         .configure(channel::config::Config {
-            timer: &lstimer,
+            timer: &esc_timer,
             duty_pct: 0,
             drive_mode: DriveMode::PushPull,
         })
         .unwrap();
 
-    info!("LEDC ready: Timer0 50 Hz — Ch0 → G14 (servo), Ch1 → G1 (ESC)");
+    info!("LEDC ready: 50 Hz — Ch0/Timer0 → G14 (servo), Ch1/Timer2 → G13 (ESC, temporary)");
     info!("WHEELS OFF THE GROUND. Starting in 3 s.");
     Timer::after(Duration::from_millis(3000)).await;
 

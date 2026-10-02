@@ -36,7 +36,7 @@ Both cars run the same core (input session → chassis policy → motor driver);
 **jocar** — 2S → 5 V buck → board 5VIN, 2S direct → TB6612 VM. 12 V-rated N30 4000 RPM, single rear drive (no differential), TB6612 channel A. SG90 servo. Pin map: `docs/wiring.md`.
 Durable criterion: **full duty is safe** — the motor is 12 V-rated, so 2S is under-voltage, and heat comes from stall current, not voltage. The steer-throttle mix is what keeps that stall current down (without a differential the front wheels scrub through turns).
 
-**1/10 car** (`rc10` bin) — 2S → buck A (≥3 A) → MG996R servo, 2S → buck B → board 5VIN, 2S direct → ESC (G1). Brushed 540 + BDESC-S10E-RTR. **The ESC's BEC stays disconnected** (a 1.5–2.5 A servo stall on a 2 A BEC can reset the ESC itself).
+**1/10 car** (`rc10` bin) — 2S → buck A (≥3 A) → MG996R servo, 2S → buck B → board 5VIN, 2S direct → ESC. ESC throttle pin is **G13 for now** (borrowed from the other car's PWMA so its adapter harness works unchanged; the design pin is G1 — see the plan §3.6). While the ESC sits on G13, flash this car with `cargo run --bin rc10`: a bare `cargo run` puts the other bin's 10 kHz motor PWM on that same pin. **The ESC's BEC stays disconnected** (a 1.5–2.5 A servo stall on a 2 A BEC can reset the ESC itself).
 Durable criteria: **neutral is a command, not silence** — duty 0 reads as "no signal" to an ESC, so `stop()` keeps pulsing neutral; the throttle channel must carry **no residual above neutral** (hence mix off and kick off) or the ESC never detects neutral and reverse never engages; endpoints and the pre-reverse neutral dwell are calibration inputs, not guesses (procedure: plan §3; tool: `servo-test`).
 
 ## Architecture

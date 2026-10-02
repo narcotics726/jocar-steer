@@ -13,9 +13,12 @@
 //! policy is [`crate::chassis`].
 //!
 //! Hardware / pin map:
-//! - **Steering servo** MG996R on **G14** (LEDC Timer0/Ch0, 50 Hz)
-//! - **ESC throttle** on **G1** (LEDC Timer0/Ch1 — same timer, so both stay at
-//!   50 Hz; Timer2 is free on this car)
+//! - **Steering servo** MG996R on **G14** (LEDC Timer0/Ch0, 50 Hz) — same pin on
+//!   both cars, so a harness built for the other one carries it over unchanged
+//! - **ESC throttle** on **G13** (LEDC Timer2/Ch1) — **temporarily borrowed from
+//!   the other car's PWMA pin** so its adapter harness works as-is; the design
+//!   pin is G1/Timer0-Ch1 (plan §3.6). See the swap note in `main` before
+//!   moving it back, and never flash the other bin while the ESC is on this pin.
 //! - **Receiver** on the native OTG port, G19 (D-) / G20 (D+)
 //! - Power: 2S → buck A (≥3 A) → servo, buck B → board 5VIN, and 2S direct to
 //!   the ESC. **The ESC's BEC stays disconnected** (see the plan §3.5 for the
@@ -128,10 +131,8 @@ async fn main(_spawner: Spawner) -> ! {
     // ── Control-phase watchdog (TIMG1 is otherwise idle) ──────────────
     let mut wdt = TimerGroup::new(peripherals.TIMG1).wdt;
 
-    // ── One 50 Hz timer for servo + ESC (LEDC Timer0) ─────────────────
-    // Both outputs are RC pulses on the same period, so they share a timer;
-    // only the channels differ. Channel 2/Timer1 were found to produce no
-    // output on this board earlier, hence Ch0 + Ch1 on Timer0.
+    // ── 50 Hz RC outputs ─────────────────────────────────────────────
+    // Timer0/Ch0 → G14: the steering servo (same pin as the other car).
     let mut ledc = Ledc::new(peripherals.LEDC);
     rc_pwm::init(&mut ledc);
 
@@ -149,10 +150,29 @@ async fn main(_spawner: Spawner) -> ! {
         })
         .unwrap();
 
-    let mut esc_ch = ledc.channel(channel::Number::Channel1, peripherals.GPIO1);
+    // Timer2/Ch1 → G13: the ESC throttle.
+    //
+    // **TEMPORARY PIN.** The design pin is G1 (plan §3.6) on Timer0/Ch1, which
+    // keeps this output off the other car's PWMA pin so both harnesses can be
+    // wired at once. G13 is that PWMA pin, borrowed here because the adapter
+    // harness was built for the other car. Moving back is: this pin back to
+    // `peripherals.GPIO1`, this channel back to Timer0 (Ch1), and its timer left
+    // as-is when the two outputs share one timer again.
+    //
+    // Timer2/Ch1 is the one LEDC combination on this board known to drive PWMA
+    // (Timer1 and Channel2 were found to produce no output). Note the same
+    // physical pin carries a completely different signal depending on which bin
+    // is flashed: a 50 Hz RC pulse here, a 10 kHz duty-cycle motor PWM in the
+    // other car's firmware. So while the ESC is on G13, flash with
+    // `cargo run --bin rc10` — a bare `cargo run` puts the other bin's 10 kHz
+    // signal on this line.
+    let mut esc_timer = ledc.timer::<LowSpeed>(timer::Number::Timer2);
+    esc_timer.configure(rc_pwm::timer_config()).unwrap();
+
+    let mut esc_ch = ledc.channel(channel::Number::Channel1, peripherals.GPIO13);
     esc_ch
         .configure(channel::config::Config {
-            timer: &lstimer,
+            timer: &esc_timer,
             duty_pct: 0, // `Esc::new` writes neutral immediately after this
             drive_mode: DriveMode::PushPull,
         })
