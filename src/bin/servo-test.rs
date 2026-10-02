@@ -72,10 +72,12 @@
 //! **D. Park** — both channels to 1500 µs. Never leave the tool with a throttle
 //! still commanded.
 //!
-//! Sections A, C, E and F are switched by the `RUN_*` constants below
-//! `NEUTRAL_US`: A wears the steering linkage against its stop, C assumes a
-//! reverse protocol that E has to establish first, E has already identified that
-//! protocol, and F is the current question (minimal recipe + accepted depths).
+//! Sections A, B, C, E, F and G are switched by the `RUN_*` constants below
+//! `NEUTRAL_US`. Each switch exists because its question is either answered
+//! (A: servo endpoints, B: arm/cold-start/forward, E: which protocol, F: is a
+//! brake pulse needed) or has a cost (A wears the steering linkage against its
+//! stop; C measures a shape the ESC turned out not to speak). G is the live
+//! question: how short can the two reverse-gate durations be.
 
 use defmt::info;
 use embassy_executor::Spawner;
@@ -116,9 +118,17 @@ const RUN_DWELL_SWEEP: bool = false;
 /// pattern reaches reverse, and so does a cold start. Off by default now.
 const RUN_PROTOCOL_PROBE: bool = false;
 
-/// Section F (what is the *minimal* recipe, and which depths are accepted?) is
-/// the current question.
-const RUN_RECIPE_PROBE: bool = true;
+/// Section F (minimal recipe + accepted depths) has answered too: a brake pulse
+/// is required, a longer window alone is not, and reverse is proportional from
+/// 1450 down to 1050 µs. Off by default now.
+const RUN_RECIPE_PROBE: bool = false;
+
+/// Section B (arm, cold-start reverse, forward probe) — all three answered.
+const RUN_ESC_PROBE: bool = false;
+
+/// Section G is the current question: how short can the two gate durations be?
+/// That is the whole delay a driver feels between pulling reverse and moving.
+const RUN_GATE_SWEEP: bool = true;
 
 /// Set a pulse and hold it, announcing the value on the console (the console is
 /// the only readout: there is no input device attached to this tool).
@@ -261,6 +271,58 @@ async fn reverse_recipe_probe<C: ChannelHW>(esc: &mut C) {
     }
 }
 
+/// G. How *short* can the reverse gate be? Two sweeps, one question each.
+///
+/// Established by F: after a forward demand, reverse needs a sub-neutral brake
+/// pulse *and* a neutral window (400 ms + 600 ms worked; 600 ms with no brake
+/// pulse did not; cold start needs neither). What is still unknown is how much
+/// of each is necessary — and that is exactly the delay a driver feels between
+/// pulling reverse and the car moving.
+///
+/// One question per step, and the answer is a *step number*, so there is nothing
+/// to hold in your head: the first step of a sweep that reverses is its minimum.
+#[allow(
+    clippy::large_stack_frames,
+    reason = "same per-step console formatting as the servo sweep"
+)]
+async fn gate_minimum_sweep<C: ChannelHW>(esc: &mut C) {
+    info!("G. reverse gate minimums — 9 steps, ONE question each: does it reverse?");
+    info!("   Write down the FIRST step number of each sweep that reverses.");
+
+    // Nothing below means anything until the unit is armed.
+    hold(esc, NEUTRAL_US, 5000, "neutral: the ESC arms here").await;
+
+    info!("G1 — brake duration under test, neutral window fixed at 600 ms");
+    for (i, brake_ms) in [50u64, 100, 150, 200, 300].into_iter().enumerate() {
+        info!(
+            "  === G1[{}/5]: brake {} ms — watch for reverse ===",
+            i + 1,
+            brake_ms
+        );
+        hold(esc, 1700, 2000, "forward (sets the direction latch)").await;
+        hold(esc, 1400, brake_ms, "brake (the value under test)").await;
+        hold(esc, NEUTRAL_US, 600, "neutral").await;
+        hold(esc, 1400, 2000, "REVERSE?").await;
+        hold(esc, NEUTRAL_US, 1000, "neutral").await;
+    }
+
+    info!("G2 — neutral window under test, brake fixed at 400 ms (the known-good value)");
+    for (i, neutral_ms) in [50u64, 100, 200, 400].into_iter().enumerate() {
+        info!(
+            "  === G2[{}/4]: neutral {} ms — watch for reverse ===",
+            i + 1,
+            neutral_ms
+        );
+        hold(esc, 1700, 2000, "forward").await;
+        hold(esc, 1400, 400, "brake").await;
+        hold(esc, NEUTRAL_US, neutral_ms, "neutral (the value under test)").await;
+        hold(esc, 1400, 2000, "REVERSE?").await;
+        hold(esc, NEUTRAL_US, 1000, "neutral").await;
+    }
+
+    info!("G done — the first reversing step of each sweep is its minimum.");
+}
+
 /// C. How long must neutral be held before a forward→reverse command works?
 ///
 /// Run *after* section E: this sweep only means something once reverse is known
@@ -367,7 +429,11 @@ async fn main(_spawner: Spawner) -> ! {
     } else {
         info!("(section A skipped: RUN_SERVO_SWEEP = false — servo already measured)");
     }
-    esc_arm_and_probe(&mut esc_ch).await;
+    if RUN_ESC_PROBE {
+        esc_arm_and_probe(&mut esc_ch).await;
+    } else {
+        info!("(section B skipped: RUN_ESC_PROBE = false — arm/cold-start/forward all answered)");
+    }
     if RUN_PROTOCOL_PROBE {
         reverse_protocol_probe(&mut esc_ch).await;
     } else {
@@ -375,6 +441,9 @@ async fn main(_spawner: Spawner) -> ! {
     }
     if RUN_RECIPE_PROBE {
         reverse_recipe_probe(&mut esc_ch).await;
+    }
+    if RUN_GATE_SWEEP {
+        gate_minimum_sweep(&mut esc_ch).await;
     }
     if RUN_DWELL_SWEEP {
         reverse_dwell_sweep(&mut esc_ch).await;
