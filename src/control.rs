@@ -17,8 +17,22 @@ use embassy_time::{Duration, Instant};
 /// the [`MotorDriver`](crate::chassis::MotorDriver) implementation.
 #[derive(Clone, Copy)]
 pub struct ControlConfig {
-    /// Maximum steering deflection per side, in degrees.
-    pub steer_max_deg: i32,
+    /// Maximum steering deflection to the **left**, in degrees (a positive
+    /// command turns left — an empirical, per-car fact: it was verified through
+    /// the direction `center_trim_deg` moved the wheels, not derived).
+    ///
+    /// Separate from the right limit because steering linkages are not
+    /// symmetric: the knuckle's own stops can differ by several degrees, and the
+    /// only software lever is to cap each side separately. Measured on the
+    /// 1/10 car: both ends sit 3–5° short of their stop at ±75° of servo travel,
+    /// i.e. the asymmetry is in the stops, not in the servo's range.
+    pub steer_max_left_deg: i32,
+    /// Maximum steering deflection to the **right**, in degrees (a negative
+    /// command turns right).
+    ///
+    /// Evening the two sides out by *reducing* this one is the safe direction;
+    /// raising `steer_max_left_deg` eats that side's margin to its stop.
+    pub steer_max_right_deg: i32,
     /// Maximum motor speed, in abstract units (±`motor_max_speed`). The actuator
     /// maps them into its own domain — duty for a TB6612 channel, pulse width
     /// for an ESC.
@@ -109,13 +123,19 @@ pub fn rx_to_deg(rx: u8, deadzone: i32, max_deg: i32) -> i32 {
 ///
 /// Without this, the motor fights the front-wheel scrub during turns on a
 /// chassis with no differential, which is the main source of stall current and
-/// motor heat there.
+/// motor heat there. Normalised by *that side's* limit, so an asymmetric
+/// steering limit does not skew the mix.
 pub fn speed_limit(steer_deg: i32, cfg: &ControlConfig) -> i32 {
     if cfg.steer_mix_num == 0 {
         return cfg.motor_max_speed;
     }
+    let limit = if steer_deg >= 0 {
+        cfg.steer_max_left_deg
+    } else {
+        cfg.steer_max_right_deg
+    };
     let cut = steer_deg.abs() * cfg.motor_max_speed * cfg.steer_mix_num
-        / (cfg.steer_max_deg * cfg.steer_mix_den);
+        / (limit * cfg.steer_mix_den);
     (cfg.motor_max_speed - cut).max(0)
 }
 

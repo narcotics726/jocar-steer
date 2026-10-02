@@ -210,18 +210,21 @@ async fn main(_spawner: Spawner) -> ! {
 
     // ── Chassis parameters ───────────────────────────────────────────
     let cfg = ControlConfig {
-        // Measured with `servo-test` H: at ±75° of servo travel the front wheels
-        // are still 3–5° short of their mechanical stop and nothing buzzes, i.e.
-        // the servo's range covers essentially all the steering this linkage has
-        // to give — the stop sits just past it.
-        // 70° with the +2° trim below sends 1122…1900 µs, inside the tested
-        // 1084…1916 µs band with margin at both ends, and leaves those 3–5° of
-        // wheel travel unused so full lock never holds a linkage against its stop
-        // (the plan's criterion: a jammed steering stop is a sustained stall).
+        // Steering limits are *per side* because this linkage is not symmetric:
+        // measured with `servo-test` H, at ±75° of servo travel *both* ends are
+        // still 3–5° short of their mechanical stop and nothing buzzes, i.e. the
+        // asymmetry lives in the knuckle stops, not in the servo's range. The
+        // wheels turn further to the right, so the right limit is the one pulled
+        // in — reducing the larger side is the safe direction, raising the
+        // smaller one eats its margin.
+        // Left 72 with the +2° trim sends 1911 µs — inside the tested 1084…1916 µs
+        // band, and that band's upper end is why the left cannot go higher: +75°
+        // would be 1927 µs, past anything verified.
         // More *maximum* angle is not available in software; a longer servo arm
         // (or a shorter knuckle arm) would only make the same maximum arrive
         // sooner, i.e. more responsive mid-stick.
-        steer_max_deg: 70,
+        steer_max_left_deg: 72,
+        steer_max_right_deg: 68,
         motor_max_speed: MOTOR_MAX_SPEED,
         // Un-calibrated first value, carried over from the other car. The ESC
         // is the actuator with its own soft start, so the slew here is about
@@ -265,10 +268,14 @@ async fn main(_spawner: Spawner) -> ! {
         failsafe_timeout_ms: 2000,
     };
 
-    let steering = Steering::new(servo_ch, CENTER_TRIM_DEG, cfg.steer_max_deg);
+    let steering = Steering::new(
+        servo_ch,
+        CENTER_TRIM_DEG,
+        cfg.steer_max_left_deg.max(cfg.steer_max_right_deg),
+    );
     info!(
-        "Steering: offset={}°  max={}°  right stick → steer (G14)",
-        CENTER_TRIM_DEG, cfg.steer_max_deg
+        "Steering: offset={}°  limits L{}/R{}°  right stick → steer (G14)",
+        CENTER_TRIM_DEG, cfg.steer_max_left_deg, cfg.steer_max_right_deg
     );
 
     // Construction starts the neutral pulse train (the ESC's arming signal).

@@ -170,7 +170,8 @@ async fn main(_spawner: Spawner) -> ! {
     let cfg = control::ControlConfig {
         // 30° is the usable limit on this chassis — past it the front
         // wheels scrub so hard (no rear diff) the motor stalls.
-        steer_max_deg: 30,
+        steer_max_left_deg: 30,
+        steer_max_right_deg: 30,
         // Full speed is safe: the N30 is 12 V-rated and the battery is 2S
         // (7.4 V), so we are under-voltage, not over. The motor heats from
         // stall current during turns, which the steer-throttle mix mitigates.
@@ -203,10 +204,14 @@ async fn main(_spawner: Spawner) -> ! {
         failsafe_timeout_ms: 2000,
     };
 
-    let steering = Steering::new(ch, CENTER_TRIM_DEG, cfg.steer_max_deg);
+    let steering = Steering::new(
+        ch,
+        CENTER_TRIM_DEG,
+        cfg.steer_max_left_deg.max(cfg.steer_max_right_deg),
+    );
     info!(
-        "Steering: offset={}°  max={}°  right stick → steer (G14)",
-        CENTER_TRIM_DEG, cfg.steer_max_deg
+        "Steering: offset={}°  limits L{}/R{}°  right stick → steer (G14)",
+        CENTER_TRIM_DEG, cfg.steer_max_left_deg, cfg.steer_max_right_deg
     );
 
     // ── TB6612 channel A: AIN1=G11, AIN2=G12, STBY=G10, PWMA=G13 ─────

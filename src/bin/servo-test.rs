@@ -36,7 +36,7 @@
 //! step printed and held 400 ms, with only half a second at each end.
 //! *Criterion:* where does the horn reach the mechanical stop (buzzing = too
 //! far), and is 1500 µs really "wheels straight"? → `CENTER_TRIM_DEG` and
-//! `steer_max_deg` in the bin. Do not let it sit at a stop: a stalled servo is
+//! `steer_max_left_deg` / `steer_max_right_deg` in the bin. Do not let it sit at a stop: a stalled servo is
 //! the one thing the local capacitor cannot save (plan §3.5).
 //!
 //! **B. ESC arm, then cold-start reverse, then forward probe (G1)** — neutral for
@@ -130,10 +130,14 @@ const RUN_ESC_PROBE: bool = false;
 /// That is the whole delay a driver feels between pulling reverse and moving.
 const RUN_GATE_SWEEP: bool = false;
 
-/// Section H measures something the firmware's `steer_max_deg` depends on and
+/// Section H measures something the firmware's steering limits depend on and
 /// nothing in the code can see: how many *wheel* degrees a commanded *servo*
 /// degree buys, and where something binds.
 const RUN_STEERING_MAP: bool = true;
+
+/// Section I sizes the per-side steering limits that H showed are needed (the
+/// knuckle stops are not symmetric).
+const RUN_STEERING_SYMMETRY: bool = true;
 
 /// Set a pulse and hold it, announcing the value on the console (the console is
 /// the only readout: there is no input device attached to this tool).
@@ -330,7 +334,7 @@ async fn gate_minimum_sweep<C: ChannelHW>(esc: &mut C) {
 
 /// H. Steering travel mapping — how much *wheel* angle per commanded *servo*°?
 ///
-/// `steer_max_deg` in the firmware is a *servo* angle, and the wheel angle is
+/// `steer_max_*_deg` in the firmware are *servo* angles, and the wheel angle is
 /// that multiplied by the linkage ratio (servo-arm length / knuckle-arm length),
 /// which is geometry the code cannot know. So this steps the servo through the
 /// candidate limits and asks the operator for the two things only they can see:
@@ -338,7 +342,7 @@ async fn gate_minimum_sweep<C: ChannelHW>(esc: &mut C) {
 /// stop — either the servo's own internal one or the linkage's).
 ///
 /// The pulse mapping is the firmware's own (500 µs per 90° from 1500 µs), so a
-/// step's label is directly usable as the next `steer_max_deg`.
+/// step's label is directly usable as the next steering limit.
 #[allow(
     clippy::large_stack_frames,
     reason = "same per-step console formatting as the servo sweep"
@@ -350,11 +354,45 @@ async fn steering_travel_map<C: ChannelHW>(ch: &mut C) {
     for deg in [0i32, 15, -15, 30, -30, 45, -45, 60, -60, 75, -75] {
         let pulse = (NEUTRAL_US as i32 + deg * 500 / 90) as u32;
         hold(ch, pulse, 2500, "wheel angle? buzz?").await;
-        info!("   ^ step: servo {}° ({} µs) — usable as steer_max_deg?", deg, pulse);
+        info!("   ^ step: servo {}° ({} µs) — usable as a steering limit?", deg, pulse);
     }
 
     hold(ch, NEUTRAL_US, 1000, "centre").await;
     info!("H done — the largest step with no buzz and enough wheel angle wins.");
+}
+
+/// I. Steering symmetry — the two ends rarely agree, and only the eye can judge.
+///
+/// H showed both ends 3–5° short of their stop at ±75° of servo travel, so the
+/// asymmetry is in the knuckle *stops* (the wheels can turn further one way) —
+/// nothing in the servo's range. The firmware answers it with per-side limits
+/// (`steer_max_left_deg` / `steer_max_right_deg`), and this sweeps the right one
+/// down against a fixed left so the number can be found without flash-iterating.
+///
+/// The left is held at its ceiling rather than raised for each step: the upper
+/// end of the band verified with H is what caps it, and reducing the right never
+/// eats a margin. Labels are the firmware's servo angles *without* the bin's
+/// +2° trim — a common shift, so the comparison is unaffected.
+#[allow(
+    clippy::large_stack_frames,
+    reason = "same per-step console formatting as the servo sweep"
+)]
+async fn steering_symmetry<C: ChannelHW>(ch: &mut C) {
+    info!("I. steering symmetry on G14 — pick the pair whose two ends look equal");
+    const LEFT_DEG: i32 = 72;
+
+    for right in [70i32, 68, 64, 60, 54, 48] {
+        let right_pulse = (NEUTRAL_US as i32 - right * 500 / 90) as u32;
+        let left_pulse = (NEUTRAL_US as i32 + LEFT_DEG * 500 / 90) as u32;
+        info!(
+            "  === I: RIGHT {}° ({} µs), then LEFT {}° ({} µs) ===",
+            right, right_pulse, LEFT_DEG, left_pulse
+        );
+        hold(ch, right_pulse, 2500, "RIGHT — note the wheel angle").await;
+        hold(ch, left_pulse, 2500, "LEFT — the same every step, the reference").await;
+        hold(ch, NEUTRAL_US, 800, "centre").await;
+    }
+    info!("I done — the right value whose angle matches that left one wins.");
 }
 
 /// C. How long must neutral be held before a forward→reverse command works?
@@ -483,6 +521,9 @@ async fn main(_spawner: Spawner) -> ! {
     }
     if RUN_STEERING_MAP {
         steering_travel_map(&mut servo_ch).await;
+    }
+    if RUN_STEERING_SYMMETRY {
+        steering_symmetry(&mut servo_ch).await;
     }
     if RUN_DWELL_SWEEP {
         reverse_dwell_sweep(&mut esc_ch).await;
