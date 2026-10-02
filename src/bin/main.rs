@@ -7,9 +7,33 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use defmt::info;
+//! Single-motor car firmware, driven by the ZD USB gamepad receiver.
+//!
+//! Current hardware:
+//! - 2S 7.4 V LiPo: battery → TB6612 VM direct; a 5 V buck feeds the
+//!   board's 5VIN. The USB-OTG pads on the board back are bridged so the
+//!   receiver's VBUS comes from the 5 V buck output (same net as 5VIN) —
+//!   a clean 5 V, within USB spec.
+//! - Motor: 12 V-rated N30 4000 RPM, single rear drive (no diff), via
+//!   TB6612 channel A: AIN1=G11, AIN2=G12, STBY=G10, PWMA=G13
+//!   (LEDC Timer2/Ch1, 10 kHz). 7.4 V is under-voltage for a 12 V motor,
+//!   so full duty is fine; heat comes from stall current, not voltage.
+//! - Servo SG90/MG90S on GPIO14 (LEDC Timer0/Ch0, 50 Hz) via [`Steering`]
+//! - USB receiver on native OTG port GPIO19 (D-) / GPIO20 (D+)
+//!
+//! Input mapping (mirrors the PS2 car in `main.rs`, single-motor only):
+//! - Left stick Y → throttle (0 = full forward, 128 = centre, 255 = reverse)
+//! - Right stick X → steering angle (0 = full left, 128 = centre, 255 = right)
+//!
+//! No dual mode: one motor + one driveshaft, so `DriveMode::Diff` and the
+//! second TB6612 channel are not used here.
+
+use defmt::{error, info};
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
+use embassy_usb_host::{
+    BusRoute, BusState, class::hub::{HubEvent, HubHandler}, handler::HandlerEvent,
+};
 use esp_hal::clock::CpuClock;
 use esp_hal::gpio::DriveMode;
 use esp_hal::ledc::{
@@ -18,11 +42,12 @@ use esp_hal::ledc::{
     timer::{self, TimerIFace},
 };
 use esp_hal::time::Rate;
+use esp_hal::usb::otg::{Usb, embassy_usb_host::Driver};
 
 use jocar_steer::control;
-use jocar_steer::ps2::{Button, Ps2Controller, Ps2Event};
 use jocar_steer::steering::Steering;
-use jocar_steer::tb6612::Tb6612;
+use jocar_steer::tb6612::Tb6612Single;
+use jocar_steer::usb_gamepad::{GamepadHost, GamepadState};
 use esp_println as _;
 
 extern crate alloc;
@@ -36,13 +61,133 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
+// ── Control configuration (single motor + steering) ──────────────────
+
+/// Static center offset in degrees to cancel residual servo mounting error.
+/// Re-calibrate for the new chassis (was 3 on the old car).
+const CENTER_TRIM_DEG: i32 = 0;
+
+/// Steering slew per control tick (degrees). 8°/tick at the report rate
+/// keeps commanded-angle changes bounded without feeling sluggish.
+const STEER_SLEW_STEP: i32 = 8;
+
+/// Steer-throttle mixing: at full steering lock the duty limit is scaled
+/// to `max_duty * (1 - STEER_MIX_NUM / STEER_MIX_DEN)`. Without this, the
+/// motor fights the front-wheel scrub during turns (no differential,
+/// near-parallel steering geometry), which is the main source of stall
+/// current and motor heat on this chassis.
+const STEER_MIX_NUM: i32 = 1;
+const STEER_MIX_DEN: i32 = 2; // cut 50 % at full lock
+
+/// Start kick: when the throttle jumps from rest, briefly output the full
+/// allowed duty so the motor can overcome static friction immediately
+/// instead of waiting for the slew ramp. The slew state still advances
+/// underneath, so the hand-back to the slew value is smooth.
+const KICK_TICKS: u8 = 6;
+/// Minimum |target| (fraction of `max_duty`) that triggers a kick — keeps
+/// light stick touches from causing full-duty bursts.
+const KICK_MIN_NUM: i32 = 3;
+const KICK_MIN_DEN: i32 = 10; // 30 %
+
+/// One-shot start-kick state.
+struct StartKick {
+ticks_left: u8,
+prev_was_zero: bool,
+}
+
+impl StartKick {
+fn new() -> Self {
+Self {
+ticks_left: 0,
+prev_was_zero: true,
+}
+}
+
+fn reset(&mut self) {
+self.ticks_left = 0;
+self.prev_was_zero = true;
+}
+
+/// Returns `Some(duty)` while the kick burst is active, `None` otherwise.
+/// `limit` is the current duty ceiling (mix already applied).
+fn tick(&mut self, target: i32, limit: i32) -> Option<i32> {
+let big_enough = target.abs() * KICK_MIN_DEN >= limit * KICK_MIN_NUM;
+if target == 0 || !big_enough {
+self.ticks_left = 0;
+self.prev_was_zero = true;
+return None;
+}
+if self.prev_was_zero {
+self.prev_was_zero = false;
+self.ticks_left = KICK_TICKS;
+}
+if self.ticks_left > 0 {
+self.ticks_left -= 1;
+return Some(limit * target.signum());
+}
+None
+}
+}
+
+// ── Helpers shared by the direct and hub read loops ───────────────────
+
+/// Apply one gamepad report: right stick → steering, left stick → motor.
+///
+/// Generic over the concrete LEDC channel types so both the direct and the
+/// hub-fallback read loops can share the exact same control policy.
+fn drive<S, M>(
+    gp: &GamepadState,
+    steering: &mut Steering<S>,
+    motors: &mut Tb6612Single<M>,
+    motor_slew: &mut control::MotorSlew,
+    kick: &mut StartKick,
+    cfg: &control::ControlConfig,
+) where
+    S: esp_hal::ledc::channel::ChannelHW,
+    M: esp_hal::ledc::channel::ChannelHW,
+{
+    let steer = control::rx_to_deg(gp.rx, cfg.rx_deadzone, cfg.steer_max_deg);
+    steering.set_target(steer);
+    steering.update(STEER_SLEW_STEP);
+
+    // Steer-throttle mixing: duty ceiling shrinks linearly with steering
+    // angle, reaching max_duty * (1 - NUM/DEN) at full lock.
+    let steer_cut = steer.abs() * cfg.motor_max_duty * STEER_MIX_NUM
+/ (cfg.steer_max_deg * STEER_MIX_DEN);
+    let duty_limit = (cfg.motor_max_duty - steer_cut).max(0);
+
+    let throttle = control::ly_to_speed(gp.ly, cfg.ly_deadzone, cfg.motor_max_duty);
+    let target = throttle.clamp(-duty_limit, duty_limit);
+
+    // Start kick overrides the slew output briefly; the slew still advances
+    // underneath so the hand-back is smooth.
+    let (slew_out, _) = motor_slew.update(target, target);
+    let m = kick.tick(target, duty_limit).unwrap_or(slew_out);
+    motors.set_motor(m);
+}
+
+/// Stop everything: reset slew state, coast the motor, center the servo.
+fn stop<S, M>(
+    steering: &mut Steering<S>,
+    motors: &mut Tb6612Single<M>,
+    motor_slew: &mut control::MotorSlew,
+    kick: &mut StartKick,
+) where
+    S: esp_hal::ledc::channel::ChannelHW,
+    M: esp_hal::ledc::channel::ChannelHW,
+{
+    motor_slew.reset();
+    kick.reset();
+    motors.coast();
+    steering.center();
+}
+
 #[allow(
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) -> ! {
-
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
@@ -52,24 +197,6 @@ async fn main(_spawner: Spawner) -> ! {
     let _ = peripherals.GPIO45;
     let _ = peripherals.GPIO46;
 
-    // usb/jtag
-    let _ = peripherals.GPIO19;
-    let _ = peripherals.GPIO20;
-
-    //
-    // we use probe_rs to flash the board, 
-    // so the jtag & uart pins are free to use
-    //
-    // // jtag
-    // let _ = peripherals.GPIO39;
-    // let _ = peripherals.GPIO40;
-    // let _ = peripherals.GPIO41;
-    // let _ = peripherals.GPIO42;
-
-    // // uart
-    // let _ = peripherals.GPIO43;
-    // let _ = peripherals.GPIO44;
-    
     // flash/psram
     let _ = peripherals.GPIO26;
     let _ = peripherals.GPIO27;
@@ -79,8 +206,6 @@ async fn main(_spawner: Spawner) -> ! {
     let _ = peripherals.GPIO31;
     let _ = peripherals.GPIO32;
     // octal flash/psram, might never need it
-    // but reserve them for now
-    // can be released once we are out of gpios
     let _ = peripherals.GPIO33;
     let _ = peripherals.GPIO34;
     let _ = peripherals.GPIO35;
@@ -96,22 +221,7 @@ async fn main(_spawner: Spawner) -> ! {
 
     info!("Embassy initialized!");
 
-    // --- PS2 controller on GPIO4/5/6/7 ---
-    let mut ps2 = Ps2Controller::new(
-        peripherals.GPIO4, // DAT (input)
-        peripherals.GPIO5, // CMD (output)
-        peripherals.GPIO7, // CLK (output)
-        peripherals.GPIO6, // ATT / CS (output, active-low)
-    );
-    info!("PS2 driver ready: DAT=G4 CMD=G5 CLK=G7 CS=G6");
-
-    // Enter analog mode so the sticks are active.
-    Timer::after(Duration::from_millis(200)).await;
-    ps2.enter_analog_mode();
-    info!("PS2 analog mode entered");
-
-    // --- SG90 servo on GPIO14 via LEDC ---
-    // Calibrate with X/A buttons to find center, left, right duty % values.
+    // ── Servo on GPIO14 via LEDC (50 Hz) ─────────────────────────────
     let mut ledc = Ledc::new(peripherals.LEDC);
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
 
@@ -133,9 +243,9 @@ async fn main(_spawner: Spawner) -> ! {
     })
     .unwrap();
 
-    // --- TB6612 motor PWM channels (G1=right, G2=left) ---
-    // NOTE: Timer1 and Channel2 were both found to produce no output on this
-    // setup (see diagnostics), so the motors use Timer2 + Channel1/Channel3.
+    // ── Motor PWM on GPIO13 (PWMA) via LEDC (10 kHz) ──────────────────
+    // NOTE: Timer1 and Channel2 were found to produce no output on this
+    // setup, so the motor uses Timer2 + Channel1 (as in main.rs).
     let mut motor_timer = ledc.timer::<LowSpeed>(timer::Number::Timer2);
     motor_timer
         .configure(timer::config::Config {
@@ -145,125 +255,296 @@ async fn main(_spawner: Spawner) -> ! {
         })
         .unwrap();
 
-    let right_pwm = peripherals.GPIO1;
-    let mut ch1 = ledc.channel(channel::Number::Channel1, right_pwm);
-    ch1.configure(channel::config::Config {
+    let motor_pwm = peripherals.GPIO13;
+    let mut mch = ledc.channel(channel::Number::Channel1, motor_pwm);
+    mch.configure(channel::config::Config {
         timer: &motor_timer,
         duty_pct: 0,
         drive_mode: DriveMode::PushPull,
     })
     .unwrap();
 
-    let left_pwm = peripherals.GPIO2;
-    let mut ch2 = ledc.channel(channel::Number::Channel3, left_pwm);
-    ch2.configure(channel::config::Config {
-        timer: &motor_timer,
-        duty_pct: 0,
-        drive_mode: DriveMode::PushPull,
-    })
-    .unwrap();
-
-    // ── Control configuration ──────────────────────────────────────────
+    // ── Control configuration ────────────────────────────────────────
     let cfg = control::ControlConfig {
-        steer_max_deg: 60,
-        motor_max_duty: 2048,
+        // 30° is the usable limit on this chassis — past it the front
+        // wheels scrub so hard (no rear diff) the motor stalls.
+        steer_max_deg: 30,
+        // Full duty is safe: the N30 is 12 V-rated and the battery is 2S
+        // (7.4 V), so we are under-voltage, not over. The motor heats from
+        // stall current during turns/start, which the steer-throttle mix
+        // and start kick above mitigate.
+        motor_max_duty: 4095,
         motor_slew_step: 512,
         rx_deadzone: 3,
         ly_deadzone: 3,
     };
 
-    // Static center offset in degrees to cancel residual mounting error.
-    const CENTER_TRIM_DEG: i32 = 3;
-
     let mut steering = Steering::new(ch, CENTER_TRIM_DEG, cfg.steer_max_deg);
-
     info!(
-        "Steering: offset={}°  max={}°  PS2 right stick → steer",
+        "Steering: offset={}°  max={}°  right stick → steer (G14)",
         CENTER_TRIM_DEG, cfg.steer_max_deg
     );
 
-    // --- TB6612FNG motor driver (direct GPIO) ---
-    // Direction pins: AIN1=G9, AIN2=G10, BIN1=G11, BIN2=G12, STBY=G13
-    let mut motors = Tb6612::new(
-        peripherals.GPIO9,
-        peripherals.GPIO10,
-        peripherals.GPIO11,
-        peripherals.GPIO12,
-        peripherals.GPIO13,
-        ch1,
-        ch2,
+    // ── TB6612 channel A: AIN1=G11, AIN2=G12, STBY=G10, PWMA=G13 ─────
+    let mut motors = Tb6612Single::new(
+        peripherals.GPIO11, // AIN1
+        peripherals.GPIO12, // AIN2
+        peripherals.GPIO10, // STBY
+        mch,
     );
     motors.enable();
-    info!("Motors enabled");
+    info!("Motor enabled: left stick Y → throttle");
 
-    let mut mode = control::DriveMode::Servo;
     let mut motor_slew = control::MotorSlew::new(cfg.motor_slew_step);
-    let mut mode_switch_held: bool = false;
+    let mut kick = StartKick::new();
+
+    // ── USB OTG host on GPIO19 (D-) / GPIO20 (D+) ────────────────────
+    let usb = Usb::new_fs(peripherals.USB_FS, peripherals.GPIO20, peripherals.GPIO19);
+    static BUS_STATE: BusState = BusState::new();
+    let (mut bus_ctrl, bus) = embassy_usb_host::bus(Driver::new(usb), &BUS_STATE);
 
     loop {
-        match ps2.read() {
-            Ps2Event::LostAnalog => {
-                info!("PS2 lost analog — held; press MODE");
-                Timer::after(Duration::from_millis(50)).await;
+        let speed = bus_ctrl.wait_for_connection().await;
+        info!("Device connected at {:?}", speed);
+
+        let mut config_buf = [0u8; 256];
+        // Bound the enumeration so a non-responding device cannot hang the
+        // loop forever (seen as a stuck state on a flaky power rail).
+        let enum_result = embassy_time::with_timeout(
+            Duration::from_secs(5),
+            bus.enumerate(BusRoute::Direct(speed), &mut config_buf),
+        )
+        .await;
+        let enum_result = match enum_result {
+            Ok(r) => r,
+            Err(_) => {
+                error!("Enumeration timed out after 5s");
+                Timer::after(Duration::from_millis(1000)).await;
+                continue;
             }
-            Ps2Event::RecoveredAnalog => {
-                ps2.enter_analog_mode();
-                info!("PS2 analog restored and re-locked");
-                motor_slew.reset();
+        };
+        match enum_result {
+            Ok((enum_info, config_len)) => {
+                info!(
+                    "Enumerated: VID={:04x} PID={:04x}",
+                    enum_info.device_desc.vendor_id,
+                    enum_info.device_desc.product_id
+                );
+
+                match GamepadHost::new(&bus, &config_buf[..config_len], &enum_info) {
+                    Ok(h) => {
+                        let mut hid = h;
+                        info!("iface0 ready — reading gamepad reports");
+
+                        let mut buf = [0u8; 64];
+                        let mut last_log = Instant::now();
+                        let mut last_report = Instant::now();
+
+                        loop {
+                            match embassy_time::with_timeout(
+                                Duration::from_millis(2000),
+                                hid.read(&mut buf),
+                            )
+                            .await
+                            {
+                                Ok(Ok(n)) if n > 0 => {
+                                    last_report = Instant::now();
+                                    if let Some(gp) = GamepadState::parse(&buf[..n]) {
+                                            drive(
+                                                &gp,
+                                                &mut steering,
+                                                &mut motors,
+                                                &mut motor_slew,
+                                                &mut kick,
+                                                &cfg,
+                                            );
+
+                                        if last_log.elapsed() >= Duration::from_millis(100) {
+                                            info!(
+                                                "lx={} ly={} rx={} ry={} btns={:04x}",
+                                                gp.lx, gp.ly, gp.rx, gp.ry, gp.buttons
+                                            );
+                                            last_log = Instant::now();
+                                        }
+                                    }
+                                }
+                                Ok(Ok(_)) => {}
+                                Ok(Err(e)) => {
+                                    error!("HID read failed: {:?}", e);
+                                    break;
+                                }
+                                Err(_) => {
+                                    if last_report.elapsed() >= Duration::from_secs(5) {
+                                        error!("no reports for 5s — device gone?");
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        stop(&mut steering, &mut motors, &mut motor_slew, &mut kick);
+                        info!("Device disconnected, waiting for next");
+                    }
+                    Err(_) => {
+                        // Not a ZD receiver — try registering it as a hub and
+                        // service downstream ports.
+                        info!("no direct gamepad — trying hub");
+                        match HubHandler::<_, 8>::try_register(&bus, &enum_info).await {
+                            Ok(mut hub) => {
+                                info!("hub registered");
+
+                                loop {
+                                    match hub.wait_for_event().await {
+                                        Ok(HandlerEvent::HandlerEvent(HubEvent::DeviceDetected {
+                                            port,
+                                            speed,
+                                        })) => {
+                                            info!("hub port {} connected speed={:?}", port, speed);
+                                            let mut cfg_buf = [0u8; 256];
+                                            let r = embassy_time::with_timeout(
+                                                Duration::from_secs(5),
+                                                hub.enumerate_port(&mut cfg_buf, port, speed),
+                                            )
+                                            .await;
+                                            match r {
+                                                Ok(Ok((ei, len))) => {
+                                                    info!(
+                                                        "hub port {} enumerated vid={:04x} pid={:04x}",
+                                                        port,
+                                                        ei.device_desc.vendor_id,
+                                                        ei.device_desc.product_id
+                                                    );
+                                                    match GamepadHost::new(
+                                                        &bus,
+                                                        &cfg_buf[..len],
+                                                        &ei,
+                                                    ) {
+                                                        Ok(h) => {
+                                                            let mut hid = h;
+                                                            info!(
+                                                                "iface0 ready on hub port {}",
+                                                                port
+                                                            );
+
+                                                            let mut buf = [0u8; 64];
+                                                            let mut last_log = Instant::now();
+                                                            let mut last_report = Instant::now();
+
+                                                            loop {
+                                                                match embassy_time::with_timeout(
+                                                                    Duration::from_millis(2000),
+                                                                    hid.read(&mut buf),
+                                                                )
+                                                                .await
+                                                                {
+                                                                    Ok(Ok(n)) if n > 0 => {
+                                                                        last_report =
+                                                                            Instant::now();
+                                                                        if let Some(gp) =
+                                                                            GamepadState::parse(
+                                                                                &buf[..n],
+                                                                            )
+                                                                        {
+                                                                            drive(
+                                                                                &gp,
+                                                                                &mut steering,
+                                                                                &mut motors,
+                                                                                &mut motor_slew,
+                                                                                &mut kick,
+                                                                                &cfg,
+                                                                            );
+
+                                                                            if last_log.elapsed()
+                                                                                >= Duration::from_millis(
+                                                                                    100,
+                                                                                )
+                                                                            {
+                                                                                info!(
+                                                                                    "lx={} ly={} rx={} ry={} btns={:04x}",
+                                                                                    gp.lx,
+                                                                                    gp.ly,
+                                                                                    gp.rx,
+                                                                                    gp.ry,
+                                                                                    gp.buttons
+                                                                                );
+                                                                                last_log =
+                                                                                    Instant::now();
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    Ok(Ok(_)) => {}
+                                                                    Ok(Err(e)) => {
+                                                                        error!(
+                                                                            "HID read failed: {:?}",
+                                                                            e
+                                                                        );
+                                                                        break;
+                                                                    }
+                                                                    Err(_) => {
+                                                                        if last_report.elapsed()
+                                                                            >= Duration::from_secs(
+                                                                                5,
+                                                                            )
+                                                                        {
+                                                                            error!(
+                                                                                "no reports for 5s — device gone?"
+                                                                            );
+                                                                            break;
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            stop(
+                                                                &mut steering,
+                                                                &mut motors,
+                                                                &mut motor_slew,
+                                                                &mut kick,
+                                                            );
+                                                            info!(
+                                                                "Device on hub port {} gone",
+                                                                port
+                                                            );
+                                                        }
+                                                        Err(_) => {
+                                                            info!(
+                                                                "hub port {} not a gamepad",
+                                                                port
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                Err(_) => {
+                                                    error!(
+                                                        "hub port {} enumeration timed out",
+                                                        port
+                                                    );
+                                                }
+                                                Ok(Err(_)) => {
+                                                    error!(
+                                                        "hub port {} enumeration failed",
+                                                        port
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            error!("hub event error: {:?}", e);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("hub register failed: {:?}", e);
+                                Timer::after(Duration::from_millis(500)).await;
+                            }
+                        }
+                    }
+                }
             }
-            Ps2Event::Analog(state) => {
-                // ── Mode switch: L3 + R3 (edge-triggered) ──────────────
-                let switch_pressed = state.pressed(Button::L3) && state.pressed(Button::R3);
-                if switch_pressed && !mode_switch_held {
-                    motors.set_left(0);
-                    motors.set_right(0);
-                    steering.center();
-                    mode = mode.flip();
-                    motor_slew.reset();
-                    info!("mode → {:?}", mode);
-                    mode_switch_held = true;
-                    Timer::after(Duration::from_millis(33)).await;
-                    continue;
-                }
-                mode_switch_held = switch_pressed;
-
-                // ── Steering + Motors per mode ─────────────────────────
-                match mode {
-                    control::DriveMode::Servo => {
-                        // Steering: right stick → servo
-                        steering.set_target(control::rx_to_deg(
-                            state.rx(),
-                            cfg.rx_deadzone,
-                            cfg.steer_max_deg,
-                        ));
-                        steering.update(8);
-
-                        // Motors: symmetric
-                        let (l_target, r_target) =
-                            control::motor_servo(state.ly(), cfg.ly_deadzone, cfg.motor_max_duty);
-                        let (l, r) = motor_slew.update(l_target, r_target);
-                        motors.set_left(l);
-                        motors.set_right(r);
-                    }
-                    control::DriveMode::Diff => {
-                        // Steering: hold centre
-                        steering.set_target(0);
-                        steering.update(8);
-
-                        // Motors: differential
-                        let (l_target, r_target) = control::motor_diff(
-                            state.ly(),
-                            state.rx(),
-                            cfg.ly_deadzone,
-                            cfg.motor_max_duty,
-                        );
-                        let (l, r) = motor_slew.update(l_target, r_target);
-                        motors.set_left(l);
-                        motors.set_right(r);
-                    }
-                }
-
-                Timer::after(Duration::from_millis(33)).await;
+            Err(e) => {
+                error!("Enumerate failed: {:?}", e);
+                Timer::after(Duration::from_millis(500)).await;
             }
         }
     }

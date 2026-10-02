@@ -1,6 +1,6 @@
 # 接线（当前整车 + 历史）
 
-## 当前：usb-gamepad-car（单电机，2026-08）
+## 当前：src/bin/main.rs（单电机，2026-08）
 
 - SG90 舵机：**G14**（LEDC Timer0/Ch0, 50 Hz）
 - TB6612FNG 通道 A（单马达）：
@@ -18,7 +18,7 @@
 
 ## 历史 / 其他固件
 
-### main.rs（PS2 双模车，旧底盘）
+### archive/ps2-dual-motor-car.rs（PS2 双模车，旧底盘，已归档）
 
 - PS2 接收器：CLK / G7, CS / G6, CMD / G5, DAT / G4（VCC / 3V3）
 - 舵机：G14（LEDC T0/Ch0）
