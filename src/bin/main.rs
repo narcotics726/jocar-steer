@@ -21,7 +21,7 @@
 //! - Servo SG90/MG90S on GPIO14 (LEDC Timer0/Ch0, 50 Hz) via [`Steering`]
 //! - USB receiver on native OTG port GPIO19 (D-) / GPIO20 (D+)
 //!
-//! Input mapping (mirrors the PS2 car in `main.rs`, single-motor only):
+//! Input mapping:
 //! - Left stick Y → throttle (0 = full forward, 128 = centre, 255 = reverse)
 //! - Right stick X → steering angle (0 = full left, 128 = centre, 255 = right)
 //!
@@ -58,7 +58,10 @@ esp_bootloader_esp_idf::esp_app_desc!();
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     defmt::error!("Panic: {}", defmt::Display2Format(info));
-    loop {}
+    // Safety: never leave the motor commanded after a panic. Reset the chip so
+    // the LEDC channels / direction pins return to their reset state (no
+    // output) instead of holding the last command.
+    esp_hal::system::software_reset()
 }
 
 // ── Control configuration (single motor + steering) ──────────────────
@@ -67,66 +70,71 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 /// Re-calibrate for the new chassis (was 3 on the old car).
 const CENTER_TRIM_DEG: i32 = 0;
 
-/// Steering slew per control tick (degrees). 8°/tick at the report rate
-/// keeps commanded-angle changes bounded without feeling sluggish.
-const STEER_SLEW_STEP: i32 = 8;
-
-/// Steer-throttle mixing: at full steering lock the duty limit is scaled
-/// to `max_duty * (1 - STEER_MIX_NUM / STEER_MIX_DEN)`. Without this, the
+/// Steer-throttle mixing: at full steering lock the speed limit is scaled
+/// to `max_speed * (1 - STEER_MIX_NUM / STEER_MIX_DEN)`. Without this, the
 /// motor fights the front-wheel scrub during turns (no differential,
 /// near-parallel steering geometry), which is the main source of stall
 /// current and motor heat on this chassis.
 const STEER_MIX_NUM: i32 = 1;
 const STEER_MIX_DEN: i32 = 2; // cut 50 % at full lock
 
-/// Start kick: when the throttle jumps from rest, briefly output the full
-/// allowed duty so the motor can overcome static friction immediately
-/// instead of waiting for the slew ramp. The slew state still advances
-/// underneath, so the hand-back to the slew value is smooth.
-const KICK_TICKS: u8 = 6;
-/// Minimum |target| (fraction of `max_duty`) that triggers a kick — keeps
-/// light stick touches from causing full-duty bursts.
+/// Start-kick duration, in milliseconds.
+///
+/// The kick briefly outputs the full allowed speed when the throttle jumps
+/// from rest, so the motor can overcome static friction immediately instead
+/// of waiting for the slew ramp. The slew state still advances underneath, so
+/// the hand-back to the slew value is smooth.
+///
+/// A/B switch for this chassis: `0` disables the kick entirely. It is a
+/// documented stopgap for stall-current heat (the structural fix is more gear
+/// reduction), so it is being re-validated on the car rather than assumed.
+const KICK_DURATION_MS: u64 = 0;
+/// Minimum |target| (fraction of `max_speed`) that triggers a kick — keeps
+/// light stick touches from causing full-speed bursts.
 const KICK_MIN_NUM: i32 = 3;
 const KICK_MIN_DEN: i32 = 10; // 30 %
 
-/// One-shot start-kick state.
+/// One-shot start-kick state, timed in physical time.
 struct StartKick {
-ticks_left: u8,
-prev_was_zero: bool,
+    /// Deadline of the active burst; `None` when no burst is running.
+    kick_until: Option<Instant>,
+    prev_was_zero: bool,
 }
 
 impl StartKick {
-fn new() -> Self {
-Self {
-ticks_left: 0,
-prev_was_zero: true,
-}
-}
+    fn new() -> Self {
+        Self {
+            kick_until: None,
+            prev_was_zero: true,
+        }
+    }
 
-fn reset(&mut self) {
-self.ticks_left = 0;
-self.prev_was_zero = true;
-}
+    fn reset(&mut self) {
+        self.kick_until = None;
+        self.prev_was_zero = true;
+    }
 
-/// Returns `Some(duty)` while the kick burst is active, `None` otherwise.
-/// `limit` is the current duty ceiling (mix already applied).
-fn tick(&mut self, target: i32, limit: i32) -> Option<i32> {
-let big_enough = target.abs() * KICK_MIN_DEN >= limit * KICK_MIN_NUM;
-if target == 0 || !big_enough {
-self.ticks_left = 0;
-self.prev_was_zero = true;
-return None;
-}
-if self.prev_was_zero {
-self.prev_was_zero = false;
-self.ticks_left = KICK_TICKS;
-}
-if self.ticks_left > 0 {
-self.ticks_left -= 1;
-return Some(limit * target.signum());
-}
-None
-}
+    /// Returns `Some(speed)` while the kick burst is active, `None` otherwise.
+    /// `limit` is the current speed ceiling (mix already applied).
+    fn tick(&mut self, target: i32, limit: i32, now: Instant) -> Option<i32> {
+        if KICK_DURATION_MS == 0 {
+            return None; // disabled (A/B switch)
+        }
+        let big_enough = target.abs() * KICK_MIN_DEN >= limit * KICK_MIN_NUM;
+        if target == 0 || !big_enough {
+            self.kick_until = None;
+            self.prev_was_zero = true;
+            return None;
+        }
+        if self.prev_was_zero {
+            self.prev_was_zero = false;
+            self.kick_until = Some(now + Duration::from_millis(KICK_DURATION_MS));
+        }
+        match self.kick_until {
+            Some(until) if now < until => Some(limit * target.signum()),
+            _ => None,
+        }
+    }
 }
 
 // ── Helpers shared by the direct and hub read loops ───────────────────
@@ -135,6 +143,12 @@ None
 ///
 /// Generic over the concrete LEDC channel types so both the direct and the
 /// hub-fallback read loops can share the exact same control policy.
+/// `dt_us` is the elapsed time since the previous report and drives the
+/// time-based slew limits; `now` is used for the kick timer.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "control-policy inputs; folded into a Chassis struct in the next phase"
+)]
 fn drive<S, M>(
     gp: &GamepadState,
     steering: &mut Steering<S>,
@@ -142,27 +156,29 @@ fn drive<S, M>(
     motor_slew: &mut control::MotorSlew,
     kick: &mut StartKick,
     cfg: &control::ControlConfig,
+    dt_us: u64,
+    now: Instant,
 ) where
     S: esp_hal::ledc::channel::ChannelHW,
     M: esp_hal::ledc::channel::ChannelHW,
 {
     let steer = control::rx_to_deg(gp.rx, cfg.rx_deadzone, cfg.steer_max_deg);
     steering.set_target(steer);
-    steering.update(STEER_SLEW_STEP);
+    steering.update(cfg.steer_slew_rate_deg_s, dt_us);
 
-    // Steer-throttle mixing: duty ceiling shrinks linearly with steering
-    // angle, reaching max_duty * (1 - NUM/DEN) at full lock.
-    let steer_cut = steer.abs() * cfg.motor_max_duty * STEER_MIX_NUM
-/ (cfg.steer_max_deg * STEER_MIX_DEN);
-    let duty_limit = (cfg.motor_max_duty - steer_cut).max(0);
+    // Steer-throttle mixing: speed ceiling shrinks linearly with steering
+    // angle, reaching max_speed * (1 - NUM/DEN) at full lock.
+    let steer_cut = steer.abs() * cfg.motor_max_speed * STEER_MIX_NUM
+        / (cfg.steer_max_deg * STEER_MIX_DEN);
+    let speed_limit = (cfg.motor_max_speed - steer_cut).max(0);
 
-    let throttle = control::ly_to_speed(gp.ly, cfg.ly_deadzone, cfg.motor_max_duty);
-    let target = throttle.clamp(-duty_limit, duty_limit);
+    let throttle = control::ly_to_speed(gp.ly, cfg.ly_deadzone, cfg.motor_max_speed);
+    let target = throttle.clamp(-speed_limit, speed_limit);
 
     // Start kick overrides the slew output briefly; the slew still advances
     // underneath so the hand-back is smooth.
-    let (slew_out, _) = motor_slew.update(target, target);
-    let m = kick.tick(target, duty_limit).unwrap_or(slew_out);
+    let (slew_out, _) = motor_slew.update(target, target, dt_us);
+    let m = kick.tick(target, speed_limit, now).unwrap_or(slew_out);
     motors.set_motor(m);
 }
 
@@ -245,7 +261,8 @@ async fn main(_spawner: Spawner) -> ! {
 
     // ── Motor PWM on GPIO13 (PWMA) via LEDC (10 kHz) ──────────────────
     // NOTE: Timer1 and Channel2 were found to produce no output on this
-    // setup, so the motor uses Timer2 + Channel1 (as in main.rs).
+    // setup, so the motor uses Timer2 + Channel1 (same as the archived PS2
+    // firmware did).
     let mut motor_timer = ledc.timer::<LowSpeed>(timer::Number::Timer2);
     motor_timer
         .configure(timer::config::Config {
@@ -269,12 +286,14 @@ async fn main(_spawner: Spawner) -> ! {
         // 30° is the usable limit on this chassis — past it the front
         // wheels scrub so hard (no rear diff) the motor stalls.
         steer_max_deg: 30,
-        // Full duty is safe: the N30 is 12 V-rated and the battery is 2S
+        // Full speed is safe: the N30 is 12 V-rated and the battery is 2S
         // (7.4 V), so we are under-voltage, not over. The motor heats from
-        // stall current during turns/start, which the steer-throttle mix
-        // and start kick above mitigate.
-        motor_max_duty: 4095,
-        motor_slew_step: 512,
+        // stall current during turns, which the steer-throttle mix mitigates.
+        motor_max_speed: 4095,
+        // Time-based now. The previous 512/tick was silently scaled by the
+        // report rate; ~15.5 k/s restores the designed 33 ms-tick behaviour.
+        motor_slew_rate_speed_s: 15_500,
+        steer_slew_rate_deg_s: 242, // ≈ the designed 8°/33 ms
         rx_deadzone: 3,
         ly_deadzone: 3,
     };
@@ -295,7 +314,7 @@ async fn main(_spawner: Spawner) -> ! {
     motors.enable();
     info!("Motor enabled: left stick Y → throttle");
 
-    let mut motor_slew = control::MotorSlew::new(cfg.motor_slew_step);
+    let mut motor_slew = control::MotorSlew::new(cfg.motor_slew_rate_speed_s);
     let mut kick = StartKick::new();
 
     // ── USB OTG host on GPIO19 (D-) / GPIO20 (D+) ────────────────────
@@ -348,7 +367,9 @@ async fn main(_spawner: Spawner) -> ! {
                             .await
                             {
                                 Ok(Ok(n)) if n > 0 => {
-                                    last_report = Instant::now();
+                                    let now = Instant::now();
+                                    let dt_us = (now - last_report).as_micros();
+                                    last_report = now;
                                     if let Some(gp) = GamepadState::parse(&buf[..n]) {
                                             drive(
                                                 &gp,
@@ -357,6 +378,8 @@ async fn main(_spawner: Spawner) -> ! {
                                                 &mut motor_slew,
                                                 &mut kick,
                                                 &cfg,
+                                                dt_us,
+                                                now,
                                             );
 
                                         if last_log.elapsed() >= Duration::from_millis(100) {
@@ -437,8 +460,12 @@ async fn main(_spawner: Spawner) -> ! {
                                                                 .await
                                                                 {
                                                                     Ok(Ok(n)) if n > 0 => {
-                                                                        last_report =
+                                                                        let now =
                                                                             Instant::now();
+                                                                        let dt_us = (now
+                                                                            - last_report)
+                                                                            .as_micros();
+                                                                        last_report = now;
                                                                         if let Some(gp) =
                                                                             GamepadState::parse(
                                                                                 &buf[..n],
@@ -451,6 +478,8 @@ async fn main(_spawner: Spawner) -> ! {
                                                                                 &mut motor_slew,
                                                                                 &mut kick,
                                                                                 &cfg,
+                                                                                dt_us,
+                                                                                now,
                                                                             );
 
                                                                             if last_log.elapsed()

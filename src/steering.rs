@@ -8,15 +8,17 @@
 //! # Slew-rate limiting
 //!
 //! [`set_target`] stores the goal without writing the channel; [`update`] is
-//! called from the fixed-rate poll loop and moves an internal `current_deg`
-//! toward `target_deg` by at most `max_step` each call, then writes the channel.
+//! called from the control loop with the elapsed time and moves an internal
+//! `current_deg` toward `target_deg` by at most `rate_deg_s × dt`, then writes
+//! the channel. Expressing the limit in physical time keeps the behaviour
+//! independent of how often the loop runs or how fast reports arrive.
 //!
 //! This is not about servo speed — the SG90 tracks fine on its own. It caps how
 //! fast the *commanded* angle changes, which flattens the servo's peak current
 //! draw when the stick is slammed. On a shared 5V rail that current spike sags
-//! the supply enough to brown out the PS2 wireless receiver, so limiting it
-//! directly reduces the dropout rate. With a large enough `max_step`, `update`
-//! degrades to the immediate 1:1 tracking of [`set_angle`].
+//! the supply enough to disturb the receiver/board, so limiting it directly
+//! reduces the dropout rate. With a large enough rate, `update` degrades to the
+//! immediate 1:1 tracking of [`set_angle`].
 
 use esp_hal::ledc::channel::ChannelHW;
 
@@ -103,9 +105,12 @@ impl<Ch: ChannelHW> Steering<Ch> {
         self.target_deg = deg.clamp(-self.max_deg, self.max_deg);
     }
 
-    /// Move `current_deg` toward `target_deg` by at most `max_step` degrees,
-    /// then write the channel. Call once per fixed-rate tick.
-    pub fn update(&mut self, max_step: i32) {
+    /// Move `current_deg` toward `target_deg` by at most `rate_deg_s × dt`,
+    /// then write the channel. `dt_us` is the elapsed time since the previous
+    /// call, in microseconds.
+    pub fn update(&mut self, rate_deg_s: i32, dt_us: u64) {
+        let max_step = (rate_deg_s as i64 * dt_us as i64 / 1_000_000)
+            .clamp(0, i32::MAX as i64) as i32;
         let delta = (self.target_deg - self.current_deg).clamp(-max_step, max_step);
         if delta != 0 {
             self.current_deg += delta;

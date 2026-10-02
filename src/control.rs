@@ -1,7 +1,7 @@
-//! Control policy for dual-mode car (servo-steer / differential-drive).
+//! Control policy (steering + throttle mapping).
 //!
-//! Pure mapping functions translate PS2 stick/button bytes into steering
-//! and motor commands. [`MotorSlew`] adds stateful slew-rate limiting and
+//! Pure mapping functions translate stick bytes into steering and motor
+//! commands. [`MotorSlew`] adds stateful, time-based slew-rate limiting and
 //! coast-before-reverse protection.
 
 // ── Configuration ─────────────────────────────────────────────────────
@@ -11,19 +11,28 @@
 pub struct ControlConfig {
     /// Maximum steering deflection per side, in degrees.
     pub steer_max_deg: i32,
-    /// Maximum motor duty (12-bit: 0..4095).
-    pub motor_max_duty: i32,
-    /// Maximum motor duty change per tick (~33 ms).
-    pub motor_slew_step: i32,
+    /// Maximum motor speed, in abstract units (±4095). The actuator maps them
+    /// into its own domain — duty for a TB6612 channel, pulse width for an ESC.
+    pub motor_max_speed: i32,
+    /// Maximum motor speed change per second (abstract units/s). Expressed in
+    /// physical time so the limit does not depend on the control loop rate or
+    /// on how fast gamepad reports arrive.
+    pub motor_slew_rate_speed_s: i32,
+    /// Maximum commanded steering change per second (degrees/s). Caps the
+    /// servo's peak current draw when the stick is slammed.
+    pub steer_slew_rate_deg_s: i32,
     /// Deadzone around right-stick X centre (±counts).
     pub rx_deadzone: i32,
     /// Deadzone around left-stick Y centre (±counts).
     pub ly_deadzone: i32,
 }
 
-// ── Drive mode ────────────────────────────────────────────────────────
+// ── Drive mode (legacy dual-mode era) ─────────────────────────────────
 
 /// Steering strategy for the car.
+///
+/// Only the archived dual-motor chassis used `Diff`; the current cars drive a
+/// single motor. Kept until the dual-mode remnants are removed.
 #[derive(Clone, Copy, PartialEq, defmt::Format)]
 pub enum DriveMode {
     /// Servo axle steers; both motors drive symmetrically.
@@ -49,12 +58,12 @@ impl DriveMode {
 /// The centre value 128 splits the range asymmetrically (±128 vs ±127),
 /// so we use `/128` everywhere.  At the short end the error is 1/128 ≈
 /// 0.8 %, which is invisible next to stick noise and the deadzone.
-pub fn ly_to_speed(ly: u8, deadzone: i32, max_duty: i32) -> i32 {
+pub fn ly_to_speed(ly: u8, deadzone: i32, max_speed: i32) -> i32 {
     let centered = 128 - ly as i32;
     if centered.abs() <= deadzone {
         return 0;
     }
-    centered * max_duty / 128
+    centered * max_speed / 128
 }
 
 /// Map right-stick X to a steering angle in degrees.
@@ -70,6 +79,8 @@ pub fn rx_to_deg(rx: u8, deadzone: i32, max_deg: i32) -> i32 {
 }
 
 /// Servo-mode motor command: both motors at the same speed.
+///
+/// Legacy: only the archived dual-motor firmware calls this.
 pub fn motor_servo(ly: u8, deadzone: i32, max_duty: i32) -> (i32, i32) {
     let s = ly_to_speed(ly, deadzone, max_duty);
     (s, s)
@@ -77,6 +88,8 @@ pub fn motor_servo(ly: u8, deadzone: i32, max_duty: i32) -> (i32, i32) {
 
 /// Diff-mode motor command: left/right speed split by right-stick X
 /// position for differential steering.
+///
+/// Legacy: only the archived dual-motor firmware calls this.
 pub fn motor_diff(ly: u8, rx: u8, deadzone: i32, max_duty: i32) -> (i32, i32) {
     let base = ly_to_speed(ly, deadzone, max_duty);
 
@@ -94,38 +107,45 @@ pub fn motor_diff(ly: u8, rx: u8, deadzone: i32, max_duty: i32) -> (i32, i32) {
 
 // ── Motor slew-rate limiter ───────────────────────────────────────────
 
-/// Stateful slew-rate limiter with coast-before-reverse protection.
+/// Stateful, time-based slew-rate limiter with coast-before-reverse protection.
 ///
 /// Two-layer protection:
-/// 1. **Slew-rate**: per-tick duty change is clamped to `max_step`.
-/// 2. **Coast-before-reverse**: when the sign flips the output is forced
-///    to 0 for one tick so the TB6612 coasts (IN1=IN2=0) rather than
+/// 1. **Slew-rate**: the change per call is capped at `rate_per_s × dt`, so the
+///    limit is expressed in physical time and is independent of how often the
+///    control loop runs (or how fast reports arrive). The previous per-tick
+///    formulation silently scaled with the report rate.
+/// 2. **Coast-before-reverse**: when the sign flips the output is forced to 0
+///    for one call so the driver coasts (TB6612: IN1=IN2=0) rather than
 ///    reversing abruptly.
 pub struct MotorSlew {
     current_l: i32,
     current_r: i32,
     last_l: i32,
     last_r: i32,
-    max_step: i32,
+    /// Maximum speed change per second (abstract speed units/s).
+    rate_per_s: i32,
 }
 
 impl MotorSlew {
-    pub fn new(max_step: i32) -> Self {
+    pub fn new(rate_per_s: i32) -> Self {
         Self {
             current_l: 0,
             current_r: 0,
             last_l: 0,
             last_r: 0,
-            max_step,
+            rate_per_s,
         }
     }
 
-    /// Take target duties, apply slew + reverse protection, return the
+    /// Take target speeds plus the elapsed time since the previous call
+    /// (`dt_us`, microseconds), apply slew + reverse protection, and return the
     /// values that should actually be written to the motor driver.
-    pub fn update(&mut self, target_l: i32, target_r: i32) -> (i32, i32) {
-        // Layer 1: slew-rate limit
+    pub fn update(&mut self, target_l: i32, target_r: i32, dt_us: u64) -> (i32, i32) {
+        // Layer 1: time-based slew limit — the most we may move is rate × dt.
+        let max_delta = (self.rate_per_s as i64 * dt_us as i64 / 1_000_000)
+            .clamp(0, i32::MAX as i64) as i32;
         let slew = |target: i32, current: &mut i32| {
-            let delta = (target - *current).clamp(-self.max_step, self.max_step);
+            let delta = (target - *current).clamp(-max_delta, max_delta);
             *current += delta;
             *current
         };
@@ -148,8 +168,7 @@ impl MotorSlew {
         (l, r)
     }
 
-    /// Reset all internal state to zero (call on mode switch or PS2
-    /// recovery).
+    /// Reset all internal state to zero (call on stop / device disconnect).
     pub fn reset(&mut self) {
         self.current_l = 0;
         self.current_r = 0;
