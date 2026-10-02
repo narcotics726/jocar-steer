@@ -71,6 +71,10 @@
 //!
 //! **D. Park** — both channels to 1500 µs. Never leave the tool with a throttle
 //! still commanded.
+//!
+//! Sections A and C are switched by the two `RUN_*` constants below `NEUTRAL_US`:
+//! A wears the steering linkage against its stop, and C assumes a reverse
+//! protocol that section E has to establish first.
 
 use defmt::info;
 use embassy_executor::Spawner;
@@ -96,6 +100,16 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 }
 
 const NEUTRAL_US: u32 = 1500;
+
+/// Section A drives the steering linkage into its mechanical stop on purpose.
+/// Turn it on when calibrating the servo; leave it off afterwards so repeat runs
+/// of the ESC sections do not hold the servo against that stop every time.
+const RUN_SERVO_SWEEP: bool = false;
+
+/// Section C measures a dwell *assuming* reverse engages on
+/// "forward → neutral → below-neutral". Leave it off until section E has shown
+/// which protocol this ESC actually speaks — otherwise it is 45 s of nothing.
+const RUN_DWELL_SWEEP: bool = false;
 
 /// Set a pulse and hold it, announcing the value on the console (the console is
 /// the only readout: there is no input device attached to this tool).
@@ -292,10 +306,18 @@ async fn main(_spawner: Spawner) -> ! {
     info!("WHEELS OFF THE GROUND. Starting in 3 s.");
     Timer::after(Duration::from_millis(3000)).await;
 
-    servo_sweep(&mut servo_ch).await;
+    if RUN_SERVO_SWEEP {
+        servo_sweep(&mut servo_ch).await;
+    } else {
+        info!("(section A skipped: RUN_SERVO_SWEEP = false — servo already measured)");
+    }
     esc_arm_and_probe(&mut esc_ch).await;
     reverse_protocol_probe(&mut esc_ch).await;
-    reverse_dwell_sweep(&mut esc_ch).await;
+    if RUN_DWELL_SWEEP {
+        reverse_dwell_sweep(&mut esc_ch).await;
+    } else {
+        info!("(section C skipped: RUN_DWELL_SWEEP = false — needs a known reverse protocol)");
+    }
 
     // D. Park. Never leave a throttle commanded.
     servo_ch.set_duty_hw(pulse_to_counts(NEUTRAL_US));
