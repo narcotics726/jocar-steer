@@ -1,7 +1,7 @@
 # jocar-steer 架构重构计划 v3
 
 **版本**: v3（2026-10）
-**状态**: 讨论定案，待实施
+**状态**: Phase 0、Phase 1 已实施（见 §8 实施记录）；Phase 2/3 待做
 **修订链**: v1 计划 → 独立复审（7/10）→ v2 逐项定案 → v3 并入 1/10 车移植需求与跨线结论合流
 
 ---
@@ -20,7 +20,7 @@
 
 ## 1. 已执行
 
-**main.rs 归档**（构建已验证 `cargo build --bin jocar-steer` 通过；改动尚**未提交**，含两个未跟踪文件）：
+**main.rs 归档**（构建已验证 `cargo build --bin jocar-steer` 通过；改动已提交 `2177c00`）：
 
 | 变更 | 详情 |
 | --- | --- |
@@ -30,13 +30,13 @@
 | 清单 | `Cargo.toml` 删 `usb-gamepad-car` 的 `[[bin]]`；引用同步（`wiring.md`、`verification-wiring.md`） |
 | 存档说明 | 新增 `archive/README.md` |
 
-待办：新 `main.rs` 模块注释里 "mirrors the PS2 car in `main.rs`" 已过时，随 Phase 0 一并改。
+原待办（`main.rs` 里 "mirrors the PS2 car in `main.rs`" 注释过时）已随 Phase 0 清理。
 
 ---
 
 ## 2. 已定案决策（共享核心）
 
-### 2.1 P1-1 时间基准语义 —— **活 bug，热修先行**
+### 2.1 P1-1 时间基准语义 —— **活 bug，热修先行**（已实施，含二次修复；见 §8.1）
 
 - **bug（确认存在，仍在车上）**：`STEER_SLEW_STEP=8°/tick` 在报告驱动下失效——@125Hz 报告 = 1000°/s（设计 242°/s 的 4×），@1000Hz = 8000°/s（33×，形同虚设）；`KICK_TICKS=6` 从 ~200ms 缩到 6–48ms。电机侧 slew 同理。
 - slew 改 `°/s`、`speed/s`；kick 改 `ms`；用 embassy `Instant`/`Duration` 结算。
@@ -46,7 +46,7 @@
 - **命名精化**（随之而来）：control 层的 `*_duty` → `*_speed`（**抽象速度单位 ±4095**）。TB6612 里 1:1 映射为占空比，电调里按比例映射为脉宽——这正是计算/施加分离的落地。
 - **kick 结构**：改 `Instant` 比较（触发记 `kick_until`），**不是**每报告递减 `ticks_left`（否则只改单位无效）。
 
-### 2.2 P1-2 Chassis + `MotorDriver` trait
+### 2.2 P1-2 Chassis + `MotorDriver` trait（已实施；`tick` 未保留，见 §8.2）
 
 - 新模块 **`src/chassis.rs`**（不能进 `control.rs`——后者须保持零 esp-hal 依赖）。
 - 结构：`steering: Steering<S>`、`motors: M`（**驱动类型，非通道类型**）、`slew`、`kick`、`target_speed`、`cfg`、`last_report: Option<Instant>`。
@@ -69,14 +69,14 @@
 - **输入契约**：轴值 0..255、128 中心。未来换输入（ELRS/CRSF 等）= 新输入模块 + bin 调用点，`control.rs`/Chassis/执行器零改动。
 - failsafe 阈值 `cfg.failsafe_timeout_ms`。
 
-### 2.3 P1-3 计算/施加分离
+### 2.3 P1-3 计算/施加分离（已实施）
 
 - `control.rs` 纯函数：`steer_deg(rx, cfg)`、`throttle_duty→throttle_speed(ly, steer, cfg) -> i32` **一步返回最终值**（含混控削减 + clamp）。
 - **混控用目标转向角**（现状行为保留；实际角更"物理准确"但引入时变）。
 - `StartKick` 搬进 `control.rs`；`control.rs` 保持零 esp-hal 依赖。
 - **删 `DriveMode`/`motor_servo`/`motor_diff`**——涟漪已查明：唯一库外消费者是 `lighting::ws2812_stat_indicator`（其 `StatusInput` 含 `mode: DriveMode` 字段）与 `ws2812-test`（模拟 Servo/Diff/PS2 断连五阶段）。处置见 2.12。
 
-### 2.4 安全项（全部定案）
+### 2.4 安全项（全部定案，已实施）
 
 **A. panic handler**：`loop {}` → `defmt::error!` + `esp_hal::system::software_reset()`。
 
@@ -122,7 +122,7 @@
 
 原动机（`mode_switch_held` 边沿检测）随双模删除一并消失；连接状态由 `usb_session` 的循环结构表达；`StartKick.prev_was_zero` 由 Instant 计时取代；`last_report` 归 `Chassis::failsafe`。无需单列实施项。
 
-### 2.10 P5-8 硬件映射 + USB 会话（两半）
+### 2.10 P5-8 硬件映射 + USB 会话（两半；已实施，半边 A 放弃——见 §8.2）
 
 - **半边 A（降级版）**：不建 `hardware.rs`；抽 `reserve_system_pins` 辅助（GPIO 保留段样板）+ 各 bin 自带 pin-map 注释，与 `docs/wiring.md` 互链。两 bin 后去重价值上升。
 - **半边 B（硬需求）**：抽 **`src/usb_session.rs`**，两 bin 共用：`wait_for_connection`（含 5s 超时）、枚举、hub fallback、读循环、500ms 读超时、failsafe 归还 Chassis、WDT 喂狗与分阶段开关、重枚举判定。两 bin 各自只剩"初始化 + 构造 Chassis + `run()`"。
@@ -131,7 +131,7 @@
 
 **保持 `.unwrap()`**（初始化处）+ 明文策略：**启动期配置失败 = panic = 复位（日志可见）；运行期不 panic**。约束：将来任何依赖**运行时数据**的初始化不得 unwrap。理由：现有 unwrap 覆盖的皆是编译期常量错误（不可达），完整错误传播对 no_std 初始化不值。
 
-### 2.12 测试 bin 与 `lighting` 处置
+### 2.12 测试 bin 与 `lighting` 处置（已实施；本节的依赖面结论有误，见 §8.2）
 
 已查明依赖面（grep 全部 bin）：`ps2-test` 只依赖 `ps2.rs`（本次不动）→ 不会断；`pcf8575-test` 完全不 import 本库 → 不会断；`servo-test`/`battery-mon-test`/`usb-gamepad-*` 不受影响；**唯一会断的是 `ws2812-test`**（用 `control::DriveMode`）。
 
@@ -140,7 +140,7 @@
 - `servo-test` **保留并扩展为脉宽扫描/标定工具**（两车都要用；1/10 车的电调端点与倒车最小停留靠它标定）。
 - `battery-mon-test` 保留（见 3.6 低电保护）。
 
-### 2.13 AGENTS.md 瘦身（原则：不放易腐知识）
+### 2.13 AGENTS.md 瘦身（原则：不放易腐知识）—— 已实施
 
 | 内容 | 处置 |
 | --- | --- |
@@ -276,4 +276,49 @@
 
 - **bin 命名**：1/10 车 bin 暂定 `src/bin/rc10.rs`。
 - **待实测值**：电调端点/中位、倒车最小中位停留、MG996R 端点、油门死区宽度、1/10 转向限位与首次油门上限。
+- **旧车转向限位/混控（2026-10 决定：维持现状 30° + 砍 50%）**：判据是**混控是"无差速 + 擦胎 → 堵转"的补偿，所以抬高转角必须同时抬高砍幅**；同时改两个未知量不划算。等实车 A/B（看电机温度与同半径通过性）再定，届时 `steer_max_deg` 与 `steer_mix_num/den` 一起动。
 - **未定案（记录备查）**：profile 跳线选择器（已选两 bin 方案，暂不做）；电调低电保护（`battery.rs` 可用）；单路降压变体（未采纳，判据在 3.5）。
+
+---
+
+## 8. 实施记录
+
+### 8.1 Phase 0 —— 已完成（超出计划的部分一并记）
+
+计划里 Phase 0 只有"提交归档 + P1-1 热修 + 安全项 A"。实际执行时多出四项，因为 P1-1 修完后车上仍在丢控制：
+
+| 项 | 内容 | 判据 / 理由 |
+| --- | --- | --- |
+| P1-1 热修（含二次修复） | slew/kick 改时间基准 | 首版修完后舵机仍冻结：`242 × 1000µs / 1e6 = 0`，整数截断。补亚步长余量累加器后，50 Hz 报告下 140 ms 到位（理想 124 ms）。**"改用时间基准"不等于"够用"，整数截断是独立的一层。** |
+| USB 健壮性三连 | 枚举就地重试（不回落 `wait_for_connection`）/ 会话结束 `free_address` / `had_session` 后 5 s 失联复位 | 两个都实测复现过：不释放设备地址 + 根端口不重新武装 ⇒ 插拔后永久不重连；`wait_for_connection` 等的是**新**连接事件，一直插着的设备永远不产生。 |
+| 板载事件日志 | 一个未用 flash 扇区 + `tools/flashlog_decode.py` | 排查期最有效的一件工具：OTG 口被接收器占着时控制台不可用，只有落盘的历史能回答"走到哪一步了"。**不是普通日志 sink**——擦一个扇区要几十毫秒，会扰动 USB 时序。 |
+| 埋点 | 复位原因、枚举 VID/PID、接口结果、会话开始、首帧报告、解析失败 | `GamepadState::parse` 返回 `None` 时车完全无反应，但 USB 侧一切正常。必须把"压根没报告"和"报告不认识"分开，否则现象同形。 |
+
+调试规则（代价换来的）：**电池先开、再上电**——只靠 TTL-USB 供电会 brownout 复位循环（`rst:0xf BROWNOUT_RST`）。
+
+### 8.2 Phase 1 —— 已完成，四处偏离计划
+
+实施内容：`control.rs` 收编（`throttle_speed`/`speed_limit` + `StartKick` 入库 + 删 `DriveMode`/`motor_servo`/`motor_diff`）→ 新增 `src/chassis.rs`（`Chassis` + `MotorDriver`）→ 安全项 B/C（TIMG1 WDT 1 s 仅控制阶段 + 从控制循环内喂狗、读超时 2 s→500 ms、failsafe 5 s→2 s、`wait_for_connection` 5 s 超时）→ 新增 `src/usb_session.rs`（两 bin 共用的连接/枚举/hub/读循环；hub 路径这一版也吃上了埋点与 failsafe）。`src/bin/main.rs` 756 → 221 行。
+
+| 偏离 | 决定与理由 |
+| --- | --- |
+| §2.2 的 `Chassis::tick(dt)` | **不保留**。报告约 1 kHz 连续到达，`on_report` 一步"算完 + 施加"即可；`tick` 当初是为 P4-7 任务分解留的结构性后路，而 P4-7 已砍 ⇒ 就是一个无调用者的公共 API。将来真出现固定节拍控制环再加（纯加法）。 |
+| §2.10 半边 A 的 `reserve_system_pins` | **抽不出来，放弃**。这个 esp-hal rev 的 GPIO 单例是 ZST（`PhantomData<&'a mut ()>`、无 `Drop`），`let _ = peripherals.GPIOxx;` 本来就只是标记、无运行时效果：函数签名拿 `&mut Peripherals` 只能退化成借用（保证比原语句更弱），拿值又拿不到（`&mut` 里移不出来）。决定：原样留在各 bin。 |
+| §2.12 的 `lighting` 处置**前提** | **前提有误，处置照做**。计划写"唯一会断的是 `ws2812-test`"——那只查了 `DriveMode`。实际 `lighting::Rgb` 还被 `usb-gamepad-test`/`usb-gamepad-map-test` 的 RMT 编码器用着。处置：`lighting` + `ws2812-test` 一起归档，`Rgb` 就地内联进那两个 bin（各 10 行；它们是 bring-up 工具，本来就互相重复）。 |
+| `MotorSlew` 双通道 → 单通道 | 两台车都是单后驱、一个执行器；双通道是双马达时代的残留（归档固件在 git 里自带它那份）。 |
+
+两处靠"放在一起"避免走散：`failsafe_timeout_ms` 进了 `ControlConfig`（§2.2 如此定），`Wdt` 由 `usb_session` **配置**而不是 bin——因为 1 s 这个值只对本模块自己的 500 ms 读超时成立，分开放必然漂移。代码注释里写了这条耦合。
+
+### 8.3 待实车验证（Phase 1 引入的行为变化，按风险排序）
+
+1. **failsafe 2 s 会不会误触发**：前提是接收器**空闲时也连续发报告**（Xinput 约 4 ms 一帧）。若出现"松杆后约 2 s 车自己停"，flash 日志会有 `EV_STALE` ⇒ 这个前提不成立，抬高 `failsafe_timeout_ms` 即可（一条记录就能判，不用猜）。
+2. **500 ms 读超时下的取消**：链路静默时每 500 ms 取消一次 `read`（原 2 s）。正常行驶（4 ms 帧间隔）走不到这条路径；只在真的静默时执行，且 2 s 内就 halt 并拆会话。
+3. **WDT 是否误复位**：`EV_BOOT` 带复位原因。非控制阶段 WDT 关闭（连接/枚举/hub 等待），所以"上车没插接收器"不会复位循环。
+
+### 8.4 挂起与未决（下一步的输入）
+
+- **`e017` 模式 ↔ 间歇性无控制**：无法稳定复现，已决定跳过。埋点在位（`EV_ENUM_OK` 的 PID + `EV_FIRST_REPORT`/`EV_PARSE_FAIL`），复发时读一次 flash 定位。两条互斥假设：帧布局变了（⇒ 补 fallback parser）vs 配对/模式状态问题（⇒ 重连手柄即恢复）。
+- **hub `wait_for_event` 无超时**：按 §2.4 属非控制阶段（可合法无限阻塞、WDT 关闭），hub 路径真卡死时无自动恢复——与现状等价，纯改进无回归。
+- **hub 自身设备地址未释放**：只在 hub 回退路径上（当前直连可用，走不到）。
+- **`steering.rs` 的 `adjust_trim`/`trim` 无调用者**：归档 PS2 固件后没人用（与 `DriveMode` 同类），本次未动以免扩大范围。
+- **`tools/flashlog_decode.py` 的 kind 表**：新增埋点时需同步（`EV_FIRST_REPORT`/`EV_PARSE_FAIL` 已加）。

@@ -31,28 +31,21 @@ cargo test                     # Alias to `cargo build` (no test harness; all ve
 
 - **Board:** HW678 (white-label ESP32-S3 DevKitC-1 clone, WROOM-1 octal module); powered by a 5 V buck from the battery into 5VIN
 - **Battery:** 2S 7.4 V LiPo → TB6612 VM direct
-- **Motor:** 12 V-rated N30 4000 RPM, single rear drive (no differential); TB6612 channel A: PWMA=G13 (LEDC Timer2/Ch1, 10 kHz), AIN1=G11, AIN2=G12, STBY=G10
-- **Servo:** SG90 on G14 (LEDC Timer0/Ch0, 50 Hz)
-- **Gamepad:** ZD receiver on native USB GPIO19 (D-) / GPIO20 (D+); VBUS via the bridged USB-OTG pads, fed from the 5 V buck output (same net as board 5VIN) → 5 V, within USB spec
-- **Control tuning:** steer ±30° + steer-throttle mix (50 % cut at full lock) + start kick; full duty (4095) is safe — the motor is 12 V-rated, so 7.4 V is under-voltage (heat comes from stall current, not voltage)
+- **Motor:** 12 V-rated N30 4000 RPM, single rear drive (no differential); TB6612 channel A
+- **Servo:** SG90 · **Gamepad:** ZD receiver on the native USB port (OTG)
+- **Pin map:** `docs/wiring.md` (per chassis — the 1/10 car differs)
+- **Control tuning:** steer ±30° + steer-throttle mix (50 % cut at full lock); full duty (4095) is safe — the motor is 12 V-rated, so 2S is under-voltage, and heat comes from stall current, not voltage
 
 ## Architecture
 
 - `#![no_std]` with `esp-alloc` heap (72 KiB in reclaimed RAM)
-- Async runtime: `esp-rtos` (based on `embassy-executor`)
+- Async runtime: `esp-rtos` — a preemptive RTOS in front, with the embassy executor integrated on top of it (embassy-executor 0.10 has no per-task stacks)
+- Control path: USB session (connect → enumerate → read → read-timeout/failsafe/watchdog) → chassis policy (steering, mix, slew, kick) → motor driver (TB6612 today, ESC for the 1/10 car). Both cars share it through the library; a bin keeps only its pin map, chassis parameters and peripherals.
 - Logging: `defmt` over UART0 via `esp-println` (`defmt-espflash` framing), decoded by `espflash ... -L defmt`
-- Panic handler: custom `#[panic_handler]` printing via defmt (`defmt::Display2Format`)
+- Persistent event log: one unused flash sector, for what happened while the console was not attached (see `src/flash_log.rs`); replay with `espflash read-flash` + `tools/flashlog_decode.py`
+- Panic handler: custom `#[panic_handler]` printing via defmt (`defmt::Display2Format`), then a chip reset — a panicking motor loop must not keep its last command
 - Bootloader: `esp-bootloader-esp-idf` with `esp_app_desc!()`
 - Stack smashing protection enabled (`-Z stack-protector=all`)
-
-## File Layout
-
-```
-src/bin/main.rs    — Firmware entry point (#![no_main])
-src/lib.rs         — Library root (#![no_std])
-build.rs           — Linker scripts & error hints
-.cargo/config.toml — Target, runner, rustflags
-```
 
 ## Constraints
 
