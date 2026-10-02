@@ -61,7 +61,7 @@ where
         Self {
             steering,
             motors,
-            slew: MotorSlew::new(cfg.motor_slew_rate_speed_s, cfg.reverse_coast_ms),
+            slew: MotorSlew::new(&cfg),
             kick: StartKick::new(),
             cfg,
             last_report: None,
@@ -90,11 +90,11 @@ where
 
         // The kick overrides the slewed value briefly; the slew still advances
         // underneath so the hand-back is smooth. It must **not** override a
-        // reversal hold: that hold is the actuator's requirement, and a kick
+        // reversal protocol: that is the actuator's requirement, and a kick
         // would jump straight to full speed in the very direction being denied.
         let slewed = self.slew.update(target, dt_us);
         let speed = match self.kick.tick(target, limit, now, &self.cfg) {
-            Some(kick) if !self.slew.holding() => kick,
+            Some(kick) if !self.slew.in_reversal() => kick,
             _ => slewed,
         };
         self.motors.set_speed(speed);

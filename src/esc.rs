@@ -86,6 +86,67 @@ pub struct EscConfig {
     pub arm_ms: u64,
 }
 
+impl EscConfig {
+    /// Pulse for an abstract speed, with the deadzone treated as the bottom of
+    /// the range rather than a hole in it: the mapping is continuous at the
+    /// threshold, so a stick just past the deadzone asks for a pulse just past
+    /// neutral instead of stepping a few µs.
+    pub fn pulse_for(&self, speed: i32) -> u32 {
+        let full = self.speed_full.max(1);
+        // A negative deadzone would make `|s| <= deadzone` false at *centre*,
+        // i.e. a centred stick would select the reverse span. Config errors must
+        // fail towards "no drive", never towards "drive".
+        let deadzone = self.deadzone.max(0);
+        let s = speed.clamp(-full, full);
+        if s.abs() <= deadzone {
+            return self.neutral_us;
+        }
+        let over = s.abs() - deadzone;
+        let span = if s > 0 {
+            self.forward_span_us
+        } else {
+            self.reverse_span_us
+        };
+        let travel = (span as i64 * over as i64 / (full - deadzone).max(1) as i64) as u32;
+        // Saturating, not `-`: `travel` is bounded by `span`, which a config
+        // typo can make larger than `neutral_us`. A wrapping subtraction would
+        // turn "reverse" into a huge value that the clamp then pins at
+        // PULSE_MAX_US — i.e. the misconfiguration would command *full forward*
+        // instead of going to the reverse end.
+        let pulse = if s > 0 {
+            self.neutral_us.saturating_add(travel)
+        } else {
+            self.neutral_us.saturating_sub(travel)
+        };
+        pulse.clamp(PULSE_MIN_US, PULSE_MAX_US)
+    }
+
+    /// The abstract speed that lands on `pulse_us`: the inverse of
+    /// [`pulse_for`](Self::pulse_for).
+    ///
+    /// Exists so a bin can express a *pulse* the driver will emit as a control-
+    /// layer speed — the shallow braking pulse a latching ESC needs before it
+    /// accepts reverse is measured in µs, and hand-computing the speed would rot
+    /// the moment a span changes.
+    pub fn speed_for_pulse(&self, pulse_us: u32) -> i32 {
+        let full = self.speed_full.max(1);
+        let deadzone = self.deadzone.max(0);
+        let range = (full - deadzone).max(1) as i64;
+        let (span, travel) = if pulse_us >= self.neutral_us {
+            (self.forward_span_us, pulse_us - self.neutral_us)
+        } else {
+            (self.reverse_span_us, self.neutral_us - pulse_us)
+        };
+        let over = (travel as i64 * range / span.max(1) as i64) as i32;
+        let magnitude = (over + deadzone).clamp(0, full);
+        if pulse_us >= self.neutral_us {
+            magnitude
+        } else {
+            -magnitude
+        }
+    }
+}
+
 /// Brushed ESC on one LEDC channel.
 pub struct Esc<Ch> {
     channel: Ch,
@@ -129,40 +190,7 @@ impl<Ch: ChannelHW> Esc<Ch> {
         this
     }
 
-    /// Pulse for an abstract speed, with the deadzone treated as the bottom of
-    /// the range rather than a hole in it: the mapping is continuous at the
-    /// threshold, so a stick just past the deadzone asks for a pulse just past
-    /// neutral instead of stepping a few µs.
-    fn pulse_for(&self, speed: i32) -> u32 {
-        let full = self.cfg.speed_full.max(1);
-        // A negative deadzone would make `|s| <= deadzone` false at *centre*,
-        // i.e. a centred stick would select the reverse span. Config errors must
-        // fail towards "no drive", never towards "drive".
-        let deadzone = self.cfg.deadzone.max(0);
-        let s = speed.clamp(-full, full);
-        if s.abs() <= deadzone {
-            return self.cfg.neutral_us;
-        }
-        let over = s.abs() - deadzone;
-        let span = if s > 0 {
-            self.cfg.forward_span_us
-        } else {
-            self.cfg.reverse_span_us
-        };
-        let travel = (span as i64 * over as i64 / (full - deadzone).max(1) as i64) as u32;
-        // Saturating, not `-`: `travel` is bounded by `span`, which a config
-        // typo can make larger than `neutral_us`. A wrapping subtraction would
-        // turn "reverse" into a huge value that the clamp then pins at
-        // PULSE_MAX_US — i.e. the misconfiguration would command *full forward*
-        // instead of going to the reverse end.
-        let pulse = if s > 0 {
-            self.cfg.neutral_us.saturating_add(travel)
-        } else {
-            self.cfg.neutral_us.saturating_sub(travel)
-        };
-        pulse.clamp(PULSE_MIN_US, PULSE_MAX_US)
-    }
-
+    /// Pulse for an abstract speed — see [`EscConfig::pulse_for`].
     fn write_neutral(&mut self) {
         self.write_pulse(self.cfg.neutral_us);
     }
@@ -181,7 +209,7 @@ impl<Ch: ChannelHW> MotorDriver for Esc<Ch> {
             self.write_neutral();
             return;
         }
-        self.write_pulse(self.pulse_for(speed));
+        self.write_pulse(self.cfg.pulse_for(speed));
     }
 
     /// Continuous neutral — *not* silence (see the module docs).

@@ -181,6 +181,31 @@ async fn main(_spawner: Spawner) -> ! {
         })
         .unwrap();
 
+    // ── ESC parameters ───────────────────────────────────────────────
+    let esc_cfg = EscConfig {
+        speed_full: MOTOR_MAX_SPEED,
+        // Bench-measured (servo-test sections B/E/F): the unit arms here,
+        // forward runs from ~1550 µs up, and reverse is proportional from ~1450
+        // down to at least 1050 µs.
+        neutral_us: 1500,
+        // ~70 % of nominal span for the first runs. This is a deliberate cap,
+        // not a measured endpoint: raise it once the car has been driven.
+        forward_span_us: 350,
+        // The reverse band is at least 1450..1050, so full reverse
+        // (neutral − 350 = 1150 µs) sits comfortably inside it.
+        reverse_span_us: 350,
+        // Must swallow what the stick still reports at rest *after*
+        // `ly_deadzone: 3` has been applied: ~5 counts of residual + 3 counts of
+        // deadzone = 8/128 of the range ≈ 256 units. Read the resting `ly=` off
+        // the console (it prints every 100 ms) and adjust — too narrow and the
+        // ESC never sees neutral, which kills reverse in a way that looks
+        // exactly like dead hardware.
+        deadzone: 256,
+        // Continuous neutral hold after power-up/reset before throttle is
+        // accepted; the criterion is the unit's own arm confirmation.
+        arm_ms: 2000,
+    };
+
     // ── Chassis parameters ───────────────────────────────────────────
     let cfg = ControlConfig {
         // Bench measurement (servo sweep on G14): the linkage binds at the last
@@ -212,39 +237,20 @@ async fn main(_spawner: Spawner) -> ! {
         kick_duration_ms: 0,
         kick_min_num: 3,
         kick_min_den: 10,
-        // The ESC latches its direction and only releases the latch after a
-        // neutral dwell; measured from the *demanded* direction, and the ramp is
-        // frozen while it holds so the reverse onset is a ramp, not a step
-        // (MotorSlew). Too short and reverse silently never engages — this is
-        // boundary condition ① of the plan and section C of `servo-test` is how
-        // it gets calibrated.
-        reverse_coast_ms: 300,
+        // The ESC's reverse protocol, measured on the bench (servo-test F). It is
+        // *three* phases, not two: after a forward demand the first sub-neutral
+        // pulse is a brake, and only a second one — after neutral — is reverse.
+        //   no brake pulse + 600 ms neutral + reverse → nothing
+        //   400 ms brake  + 600 ms neutral + reverse → reverse, at every depth
+        //                                                from 1450 down to 1050 µs
+        // The brake pulse is the 1400 µs that F1 used, expressed as a speed so a
+        // change to the spans above cannot leave it in the wrong place.
+        // Both durations are the measured-working values, not minimums.
+        reversal_brake_speed: esc_cfg.speed_for_pulse(1400),
+        reversal_brake_ms: 400,
+        reversal_neutral_ms: 600,
         // Full throttle for 2 s is ~16 m on this car; this is a safety limit.
         failsafe_timeout_ms: 2000,
-    };
-
-    let esc_cfg = EscConfig {
-        speed_full: MOTOR_MAX_SPEED,
-        // Nominal RC endpoints. **Calibrate before driving**: procedure and
-        // criteria are in the plan §3.2/§3.4 and the values come from
-        // `servo-test` + a bench run with the wheels off the ground.
-        neutral_us: 1500,
-        // ~70 % of nominal span for the first run. Raise it once the endpoints
-        // (and the ESC's cut-off behaviour) are known.
-        forward_span_us: 350,
-        // Reverse travel is often shorter on this class of ESC; keep it equal
-        // for now and calibrate the point where reverse reliably engages.
-        reverse_span_us: 350,
-        // Must swallow what the stick still reports at rest *after*
-        // `ly_deadzone: 3` has been applied: ~5 counts of residual + 3 counts of
-        // deadzone = 8/128 of the range ≈ 256 units. Read the resting `ly=` off
-        // the console (it prints every 100 ms) and adjust — too narrow and the
-        // ESC never sees neutral, which kills reverse in a way that looks
-        // exactly like dead hardware.
-        deadzone: 256,
-        // ESC needs a continuous neutral hold after power-up/reset before it
-        // accepts throttle; the criterion is its own arm confirmation.
-        arm_ms: 2000,
     };
 
     let steering = Steering::new(servo_ch, CENTER_TRIM_DEG, cfg.steer_max_deg);
@@ -256,13 +262,16 @@ async fn main(_spawner: Spawner) -> ! {
     // Construction starts the neutral pulse train (the ESC's arming signal).
     let esc = Esc::new(esc_ch, esc_cfg);
     info!(
-        "ESC on G1: neutral={}µs fwd={}µs rev={}µs deadzone={} arm={}ms rev-coast={}ms",
+        "ESC on G13 (temp pin): neutral={}µs fwd={}µs rev={}µs deadzone={} arm={}ms",
         esc_cfg.neutral_us,
         esc_cfg.forward_span_us,
         esc_cfg.reverse_span_us,
         esc_cfg.deadzone,
-        esc_cfg.arm_ms,
-        cfg.reverse_coast_ms
+        esc_cfg.arm_ms
+    );
+    info!(
+        "ESC reverse protocol: brake {} ({}ms) → neutral {}ms → ramp",
+        cfg.reversal_brake_speed, cfg.reversal_brake_ms, cfg.reversal_neutral_ms
     );
 
     let mut chassis = Chassis::new(steering, esc, cfg);

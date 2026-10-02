@@ -191,10 +191,12 @@ async fn main(_spawner: Spawner) -> ! {
         kick_duration_ms: 0,
         kick_min_num: 3,
         kick_min_den: 10, // kick only above 30 % throttle
-        // Short H-bridge coast on a direction reversal. This used to be "one
-        // call", i.e. the last per-tick quantity in the control path; 5 ms is
-        // the same thing expressed in time.
-        reverse_coast_ms: 5,
+        // A brushed H-bridge needs no brake phase before a reversal — just the
+        // short coast below. ("One call" used to be the last per-tick quantity
+        // in the control path; 5 ms is the same thing expressed in time.)
+        reversal_brake_speed: 0,
+        reversal_brake_ms: 0,
+        reversal_neutral_ms: 5,
         // A lost link must not leave the car at its last throttle. 2 s at full
         // speed is already ~16 m on the 1/10 car, so this is a safety limit,
         // not a comfort setting.
