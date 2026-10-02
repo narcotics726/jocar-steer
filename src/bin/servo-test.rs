@@ -128,7 +128,12 @@ const RUN_ESC_PROBE: bool = false;
 
 /// Section G is the current question: how short can the two gate durations be?
 /// That is the whole delay a driver feels between pulling reverse and moving.
-const RUN_GATE_SWEEP: bool = true;
+const RUN_GATE_SWEEP: bool = false;
+
+/// Section H measures something the firmware's `steer_max_deg` depends on and
+/// nothing in the code can see: how many *wheel* degrees a commanded *servo*
+/// degree buys, and where something binds.
+const RUN_STEERING_MAP: bool = true;
 
 /// Set a pulse and hold it, announcing the value on the console (the console is
 /// the only readout: there is no input device attached to this tool).
@@ -323,6 +328,35 @@ async fn gate_minimum_sweep<C: ChannelHW>(esc: &mut C) {
     info!("G done — the first reversing step of each sweep is its minimum.");
 }
 
+/// H. Steering travel mapping — how much *wheel* angle per commanded *servo*°?
+///
+/// `steer_max_deg` in the firmware is a *servo* angle, and the wheel angle is
+/// that multiplied by the linkage ratio (servo-arm length / knuckle-arm length),
+/// which is geometry the code cannot know. So this steps the servo through the
+/// candidate limits and asks the operator for the two things only they can see:
+/// how far the wheels actually turned, and whether anything buzzes (a buzz is a
+/// stop — either the servo's own internal one or the linkage's).
+///
+/// The pulse mapping is the firmware's own (500 µs per 90° from 1500 µs), so a
+/// step's label is directly usable as the next `steer_max_deg`.
+#[allow(
+    clippy::large_stack_frames,
+    reason = "same per-step console formatting as the servo sweep"
+)]
+async fn steering_travel_map<C: ChannelHW>(ch: &mut C) {
+    info!("H. steering travel mapping on G14 — at each step note (a) how far the");
+    info!("   wheels turned and (b) whether the servo buzzes (that is a stop).");
+
+    for deg in [0i32, 15, -15, 30, -30, 45, -45, 60, -60, 75, -75] {
+        let pulse = (NEUTRAL_US as i32 + deg * 500 / 90) as u32;
+        hold(ch, pulse, 2500, "wheel angle? buzz?").await;
+        info!("   ^ step: servo {}° ({} µs) — usable as steer_max_deg?", deg, pulse);
+    }
+
+    hold(ch, NEUTRAL_US, 1000, "centre").await;
+    info!("H done — the largest step with no buzz and enough wheel angle wins.");
+}
+
 /// C. How long must neutral be held before a forward→reverse command works?
 ///
 /// Run *after* section E: this sweep only means something once reverse is known
@@ -444,6 +478,11 @@ async fn main(_spawner: Spawner) -> ! {
     }
     if RUN_GATE_SWEEP {
         gate_minimum_sweep(&mut esc_ch).await;
+    } else {
+        info!("(section G skipped: RUN_GATE_SWEEP = false — gate minimums measured)");
+    }
+    if RUN_STEERING_MAP {
+        steering_travel_map(&mut servo_ch).await;
     }
     if RUN_DWELL_SWEEP {
         reverse_dwell_sweep(&mut esc_ch).await;

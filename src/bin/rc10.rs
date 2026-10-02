@@ -210,14 +210,14 @@ async fn main(_spawner: Spawner) -> ! {
 
     // ── Chassis parameters ───────────────────────────────────────────
     let cfg = ControlConfig {
-        // Bench measurement (servo sweep on G14): the linkage binds at the last
-        // few steps toward the short-pulse end, i.e. the right stop is around
-        // 1100–1150 µs, while the long-pulse end had travel left at 2000 µs. So
-        // the two sides are not symmetric, but 1500 µs is a usable centre.
-        // 45° ≈ 250 µs of travel leaves ~100 µs of margin before the right stop;
-        // the plan's estimate for this chassis was 45–60°, and the criterion for
-        // going higher is "no binding at full lock".
-        steer_max_deg: 45,
+        // Measured: the linkage binds somewhere around 1000–1150 µs at one end
+        // of the range (the other end still had travel at 2000 µs), so a
+        // *symmetric* servo limit can go to about 55° — 306 µs of travel, ~40 µs
+        // clear of that bind — before either end is held against a stop. Going
+        // higher needs `servo-test` H to say where the binding actually is and
+        // how much wheel angle each servo degree buys: if the wheels turn only a
+        // little at 45°, the limit is not the bottleneck, the linkage ratio is.
+        steer_max_deg: 55,
         motor_max_speed: MOTOR_MAX_SPEED,
         // Un-calibrated first value, carried over from the other car. The ESC
         // is the actuator with its own soft start, so the slew here is about
