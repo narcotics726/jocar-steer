@@ -94,6 +94,10 @@ const KICK_DURATION_MS: u64 = 0;
 const KICK_MIN_NUM: i32 = 3;
 const KICK_MIN_DEN: i32 = 10; // 30 %
 
+/// How many times to retry enumerating a directly-attached device before
+/// falling back to waiting for a fresh connection event.
+const ENUM_ATTEMPTS: u8 = 3;
+
 /// One-shot start-kick state, timed in physical time.
 struct StartKick {
     /// Deadline of the active burst; `None` when no burst is running.
@@ -293,7 +297,7 @@ async fn main(_spawner: Spawner) -> ! {
         // Time-based now. The previous 512/tick was silently scaled by the
         // report rate; ~15.5 k/s restores the designed 33 ms-tick behaviour.
         motor_slew_rate_speed_s: 15_500,
-        steer_slew_rate_deg_s: 242, // ≈ the designed 8°/33 ms
+        steer_slew_rate_deg_s: 400, // ≈ the designed 8°/33 ms
         rx_deadzone: 3,
         ly_deadzone: 3,
     };
@@ -326,18 +330,41 @@ async fn main(_spawner: Spawner) -> ! {
         let speed = bus_ctrl.wait_for_connection().await;
         info!("Device connected at {:?}", speed);
 
+        // Let the device finish its own power-up before the first control
+        // transfer. A hub port inserts this delay implicitly; a direct
+        // connection does not, which is one reason direct enumeration can
+        // stall on this receiver.
+        Timer::after(Duration::from_millis(200)).await;
+
         let mut config_buf = [0u8; 256];
-        // Bound the enumeration so a non-responding device cannot hang the
-        // loop forever (seen as a stuck state on a flaky power rail).
-        let enum_result = embassy_time::with_timeout(
-            Duration::from_secs(5),
-            bus.enumerate(BusRoute::Direct(speed), &mut config_buf),
-        )
-        .await;
+        // Enumerate with in-place retries. Falling back to
+        // `wait_for_connection` on failure wedges the loop: that call waits
+        // for a *new* connection event, and a device that stays plugged in
+        // never produces one — the car then needed a physical replug.
+        // Each attempt stays bounded so a non-responding device cannot hang
+        // the loop forever (seen as a stuck state on a flaky power rail).
+        let mut enum_result: Result<_, ()> = Err(());
+        for attempt in 1..=ENUM_ATTEMPTS {
+            enum_result = embassy_time::with_timeout(
+                Duration::from_secs(5),
+                bus.enumerate(BusRoute::Direct(speed), &mut config_buf),
+            )
+            .await
+            .map_err(|_| ());
+            // Retry on a timeout as well as on a transfer error (e.g. STALL).
+            if matches!(enum_result, Ok(Ok(_))) {
+                break;
+            }
+            error!("Enumeration attempt {} failed", attempt);
+            Timer::after(Duration::from_millis(200)).await;
+        }
         let enum_result = match enum_result {
             Ok(r) => r,
             Err(_) => {
-                error!("Enumeration timed out after 5s");
+                error!(
+                    "Enumeration failed {} times — waiting for a reconnect",
+                    ENUM_ATTEMPTS
+                );
                 Timer::after(Duration::from_millis(1000)).await;
                 continue;
             }
