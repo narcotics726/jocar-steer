@@ -210,14 +210,18 @@ async fn main(_spawner: Spawner) -> ! {
 
     // ── Chassis parameters ───────────────────────────────────────────
     let cfg = ControlConfig {
-        // Measured: the linkage binds somewhere around 1000–1150 µs at one end
-        // of the range (the other end still had travel at 2000 µs), so a
-        // *symmetric* servo limit can go to about 55° — 306 µs of travel, ~40 µs
-        // clear of that bind — before either end is held against a stop. Going
-        // higher needs `servo-test` H to say where the binding actually is and
-        // how much wheel angle each servo degree buys: if the wheels turn only a
-        // little at 45°, the limit is not the bottleneck, the linkage ratio is.
-        steer_max_deg: 55,
+        // Measured with `servo-test` H: at ±75° of servo travel the front wheels
+        // are still 3–5° short of their mechanical stop and nothing buzzes, i.e.
+        // the servo's range covers essentially all the steering this linkage has
+        // to give — the stop sits just past it.
+        // 70° with the +2° trim below sends 1122…1900 µs, inside the tested
+        // 1084…1916 µs band with margin at both ends, and leaves those 3–5° of
+        // wheel travel unused so full lock never holds a linkage against its stop
+        // (the plan's criterion: a jammed steering stop is a sustained stall).
+        // More *maximum* angle is not available in software; a longer servo arm
+        // (or a shorter knuckle arm) would only make the same maximum arrive
+        // sooner, i.e. more responsive mid-stick.
+        steer_max_deg: 70,
         motor_max_speed: MOTOR_MAX_SPEED,
         // Un-calibrated first value, carried over from the other car. The ESC
         // is the actuator with its own soft start, so the slew here is about
