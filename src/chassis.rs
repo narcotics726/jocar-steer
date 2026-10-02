@@ -50,10 +50,12 @@ where
     /// Build a chassis and arm its actuators.
     ///
     /// Arming is part of construction because both actuators' unarmed states
-    /// are safe *and* required: the TB6612 goes to STBY=high with duty 0
-    /// (coast), and an ESC must start emitting its neutral pulse train
-    /// immediately (that is its arming sequence). A chassis that is never armed
-    /// cannot drive anything, so there is no reason to expose the step.
+    /// are safe *and* required: the TB6612 goes to STBY=high (its direction
+    /// pins and duty come from the driver and the bin's LEDC channel — a
+    /// driver that arrives with a non-zero duty would be armed, not coasting),
+    /// and an ESC must start emitting its neutral pulse train immediately
+    /// (that is its arming sequence). A chassis that is never armed cannot
+    /// drive anything, so there is no reason to expose the step.
     pub fn new(steering: Steering<S>, mut motors: M, cfg: ControlConfig) -> Self {
         motors.enable();
         Self {
@@ -99,8 +101,16 @@ where
     /// Whether the input has been silent for longer than
     /// [`ControlConfig::failsafe_timeout_ms`].
     ///
-    /// `false` before the first report: a car that never got a report has
-    /// nothing to stop.
+    /// The clock is the last **accepted** report: frames that arrive but fail
+    /// to parse do not count as input, because nothing was applied from them
+    /// and the last commanded speed would otherwise stay live.
+    ///
+    /// `false` before the first report — and that case is deliberately *not* a
+    /// failure: a receiver can be attached and enumerated while its handset is
+    /// still off, and in that state the chassis has never been commanded
+    /// anything, so there is nothing to stop and no reason to tear the session
+    /// down. (The old firmware seeded this clock at session start and reset the
+    /// chip every ~11 s in that situation.)
     pub fn failsafe_expired(&self, now: Instant) -> bool {
         match self.last_report {
             Some(t) => (now - t).as_millis() >= self.cfg.failsafe_timeout_ms,
@@ -119,9 +129,11 @@ where
 
     /// Stop commanding the actuators and straighten the steering.
     ///
-    /// Shared by "device gone" and "input went stale": the motor coasts, the
-    /// servo centres, and the limiters start from zero next time. Centring is
-    /// deliberate — a lost link should not leave the wheels at lock.
+    /// Shared by "device gone" and "input went stale" (and called by the
+    /// session layer *before* it records the stale event, so the motor is not
+    /// left commanded across a flash erase): the motor coasts, the servo
+    /// centres, and the limiters start from zero next time. Centring is
+    /// deliberate — a lost link should not leave the wheels at lock. Idempotent.
     pub fn halt(&mut self) {
         self.slew.reset();
         self.kick.reset();

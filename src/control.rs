@@ -181,6 +181,9 @@ impl MotorSlew {
 
 /// One-shot start-kick state, timed in physical time.
 ///
+/// Private to the crate: the kick is part of the chassis' policy, and the only
+/// thing a bin would do with it is construct one — which `Chassis` already does.
+///
 /// The kick briefly outputs the full allowed speed when the throttle jumps from
 /// rest, so the motor can overcome static friction immediately instead of
 /// waiting for the slew ramp. The slew state still advances underneath, so the
@@ -189,7 +192,7 @@ impl MotorSlew {
 /// Note for ESC chassis: the kick must stay disabled there — any residual
 /// above neutral delays the ESC's neutral detection and breaks reverse (see the
 /// plan's boundary conditions).
-pub struct StartKick {
+pub(crate) struct StartKick {
     /// Deadline of the active burst; `None` when no burst is running.
     kick_until: Option<Instant>,
     prev_was_zero: bool,
@@ -203,13 +206,13 @@ impl StartKick {
         }
     }
 
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         *self = Self::new();
     }
 
     /// Returns `Some(speed)` while the kick burst is active, `None` otherwise.
     /// `limit` is the current speed ceiling (mix already applied).
-    pub fn tick(
+    pub(crate) fn tick(
         &mut self,
         target: i32,
         limit: i32,

@@ -2,27 +2,35 @@
 //!
 //! Extracted from the firmware bins because both cars share the whole input
 //! path: the same receiver, the same enumeration fallbacks, the same safety
-//! envelope. A bin supplies a USB driver, a [`Chassis`] and a
-//! [`ControlConfig`]; everything between the root port and the actuator writes
-//! lives here.
+//! envelope. A bin supplies a USB driver and a [`Chassis`] (which carries its
+//! own control configuration); everything between the root port and the
+//! actuator writes lives here.
 //!
 //! # Safety envelope (this is the code that owns it)
 //!
 //! - **Read timeout** ([`READ_TIMEOUT_MS`]): bounds every await in the control
-//!   phase, so the loop always gets back to feeding the watchdog.
+//!   phase, so the loop always gets back to feeding the watchdog and to the
+//!   failsafe check.
 //! - **Control-phase watchdog** ([`WDT_TIMEOUT_MS`]): enabled only while the
 //!   control loop runs, fed from inside that loop. It is deliberately *not*
 //!   enabled during connection/enumeration/hub waits — a car booted with no
-//!   receiver must be allowed to wait indefinitely, and those phases never have
-//!   the motors armed (the chassis is halted before entering them).
-//! - **Failsafe** ([`ControlConfig::failsafe_timeout_ms`]): reports stopping is
+//!   receiver must be allowed to wait indefinitely. Those phases have nothing
+//!   *commanded* (the chassis is halted before entering them); the drivers
+//!   themselves are enabled from construction, which is their own safe state
+//!   (TB6612: STBY high, duty 0, direction pins low).
+//! - **Failsafe** (`ControlConfig::failsafe_timeout_ms`): reports stopping is
 //!   not an error the USB stack reports — the link can look perfectly healthy
-//!   while nothing arrives. [`Chassis::failsafe_expired`] turns that into a
-//!   halt.
+//!   while nothing arrives, or while reports arrive in a layout the parser
+//!   rejects. [`Chassis::failsafe_expired`] is therefore evaluated on every
+//!   loop iteration, not only when a read times out, and it keys on the last
+//!   *accepted* report.
 //!
-//! **The watchdog timeout must stay above the longest legitimate await in the
-//! control loop.** Today that await is [`READ_TIMEOUT_MS`], hence WDT = 2× it.
-//! Anything longer added to the loop must raise the WDT timeout with it.
+//! **The watchdog timeout must stay above the longest gap between two `feed`
+//! calls in the control loop.** Today that gap is one read timeout
+//! ([`READ_TIMEOUT_MS`]) plus the iteration's own work, hence WDT = 2× it. The
+//! known consumer of the remaining margin is [`FlashLog::record`], which can
+//! erase a 4 KiB sector (tens of milliseconds) from inside the loop; anything
+//! longer added here must raise the WDT timeout with it.
 
 use defmt::{error, info};
 use embassy_time::{Duration, Instant, Timer};
@@ -91,6 +99,11 @@ impl<'d, D: UsbHostController<'d>> UsbSession<'d, D> {
     /// Never returns: every exit path either loops back to waiting for a
     /// connection or resets the chip, because a half-dead USB stack on a moving
     /// car is not a recoverable state from inside the firmware.
+    #[allow(
+        clippy::large_stack_frames,
+        reason = "one 256 B configuration-descriptor buffer (the protocol maximum for the \
+        first configuration) lives in this frame; the bin's `main` carries the same allowance"
+    )]
     pub async fn run<S, M, TG>(
         &mut self,
         chassis: &mut Chassis<S, M>,
@@ -256,7 +269,7 @@ where
                 error!("Enumeration attempt {} timed out", attempt);
                 log.record(
                     flash_log::EV_ENUM_FAIL,
-                    format_args!("timeout try{}", attempt),
+                    format_args!("timeout after 5s try{}", attempt),
                 );
             }
         }
@@ -279,8 +292,13 @@ where
 /// gamepads plugged into its downstream ports.
 ///
 /// Returns when the hub itself errors (the caller then goes back to waiting for
-/// a connection). Note this phase runs with the watchdog **off** — an idle hub
-/// may legitimately block forever, and the motors are already halted.
+/// a connection). The hub's own `wait_for_event` runs with the watchdog **off**
+/// — an idle hub may legitimately block forever — while a downstream port
+/// session goes through [`run_control`] and therefore re-enables it.
+#[allow(
+    clippy::large_stack_frames,
+    reason = "same configuration-descriptor buffer as `run`, plus `HubHandler`'s port state"
+)]
 async fn run_hub<'d, A, S, M, TG>(
     bus: &BusHandle<'d, A>,
     hub_enum: &EnumerationInfo,
@@ -304,7 +322,10 @@ async fn run_hub<'d, A, S, M, TG>(
             return;
         }
     };
-    log.record(flash_log::EV_HUB, format_args!("registered"));
+    log.record(
+        flash_log::EV_HUB,
+        format_args!("registered, waiting for events"),
+    );
     info!("hub registered");
 
     loop {
@@ -348,7 +369,12 @@ async fn run_hub<'d, A, S, M, TG>(
                         log.record(flash_log::EV_LOST, format_args!("hub port {} gone", port));
                         info!("Device on hub port {} gone", port);
                     }
-                    Err(_) => info!("hub port {} not a gamepad", port),
+                    Err(_) => {
+                        info!("hub port {} not a gamepad", port);
+                        // We enumerated this device but bind nothing to it:
+                        // hand the address back, or the address table fills up.
+                        bus.free_address(port_enum.device_address);
+                    }
                 }
             }
             Ok(_) => {}
@@ -368,6 +394,15 @@ async fn run_hub<'d, A, S, M, TG>(
 /// caller owns the teardown. The watchdog is enabled for the duration (this is
 /// the only phase that can drive the motors) and disabled again on the way out,
 /// before the caller blocks on anything unbounded.
+///
+/// The enable/disable pair has no RAII guard because this function is awaited
+/// directly and has no early return: do not wrap it in `select`/`with_timeout`,
+/// or a dropped future would leave the watchdog running into the caller's
+/// unbounded waits.
+#[allow(
+    clippy::large_stack_frames,
+    reason = "read buffer plus the diagnostic formatting in the loop"
+)]
 async fn run_control<'d, A, S, M, TG>(
     hid: &mut GamepadHost<'d, A>,
     chassis: &mut Chassis<S, M>,
@@ -389,6 +424,9 @@ async fn run_control<'d, A, S, M, TG>(
     let mut parse_fail_logged = false;
 
     wdt.enable();
+    // Feed immediately: an enabled watchdog counts from the moment it was
+    // enabled, and the first read may legitimately take the whole read timeout.
+    wdt.feed();
 
     loop {
         match embassy_time::with_timeout(Duration::from_millis(READ_TIMEOUT_MS), hid.read(&mut buf))
@@ -429,20 +467,32 @@ async fn run_control<'d, A, S, M, TG>(
                 log.record(flash_log::EV_READ_ERR, format_args!("{:?}", e));
                 break;
             }
-            Err(_) => {
-                // The read timed out. That is only fatal once the input has
-                // been silent for the failsafe window — a lost link must not
-                // leave the car at its last throttle.
-                if chassis.failsafe_expired(Instant::now()) {
-                    let window_ms = chassis.failsafe_timeout_ms();
-                    error!("{}: no reports for {} ms — stopping", label, window_ms);
-                    log.record(
-                        flash_log::EV_STALE,
-                        format_args!("no reports {}ms", window_ms),
-                    );
-                    break;
-                }
-            }
+            // A timed-out read is not itself the end of the session — the
+            // failsafe below is the single place that decides when silence
+            // becomes a stop.
+            Err(_) => {}
+        }
+
+        // Evaluated on *every* iteration, not only when a read times out:
+        // frames that keep arriving but never parse hold the link looking
+        // perfectly healthy while nothing reaches the chassis, and the last
+        // commanded speed would otherwise stay live forever. The clock is the
+        // last *accepted* report, so both failure modes stop the car here.
+        if chassis.failsafe_expired(Instant::now()) {
+            let window_ms = chassis.failsafe_timeout_ms();
+            error!(
+                "{}: no accepted report for {} ms — stopping",
+                label, window_ms
+            );
+            // Stop the car *before* touching flash: recording the event may
+            // erase a whole sector, and that is the one window where a
+            // commanded throttle would outlive the decision to stop.
+            chassis.halt();
+            log.record(
+                flash_log::EV_STALE,
+                format_args!("no accepted report {}ms", window_ms),
+            );
+            break;
         }
 
         // Fed from inside the control loop on purpose: a task that fed the

@@ -267,8 +267,9 @@ where
         self.coast();
     }
 
-    /// STBY high. Redundant if [`Tb6612Single::new`] was followed by
-    /// [`Tb6612Single::enable`], but the trait must be self-contained.
+    /// STBY high. [`Tb6612Single::new`] deliberately leaves STBY low, so this
+    /// is the call that actually arms the driver — idempotent, but not
+    /// redundant.
     fn enable(&mut self) {
         Tb6612Single::enable(self);
     }
