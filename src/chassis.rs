@@ -108,6 +108,15 @@ where
         }
     }
 
+    /// The input-silence window this chassis was configured with.
+    ///
+    /// Read by the session layer when it reports *why* it stopped, so the log
+    /// cannot disagree with the decision [`failsafe_expired`](Self::failsafe_expired)
+    /// actually made.
+    pub fn failsafe_timeout_ms(&self) -> u64 {
+        self.cfg.failsafe_timeout_ms
+    }
+
     /// Stop commanding the actuators and straighten the steering.
     ///
     /// Shared by "device gone" and "input went stale": the motor coasts, the

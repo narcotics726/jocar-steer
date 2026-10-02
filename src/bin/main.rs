@@ -217,5 +217,5 @@ async fn main(_spawner: Spawner) -> ! {
     // ── USB OTG host on GPIO19 (D-) / GPIO20 (D+) ────────────────────
     let usb = Usb::new_fs(peripherals.USB_FS, peripherals.GPIO20, peripherals.GPIO19);
     let mut session = UsbSession::new(Driver::new(usb));
-    session.run(&mut chassis, &cfg, &mut log, &mut wdt).await
+    session.run(&mut chassis, &mut log, &mut wdt).await
 }

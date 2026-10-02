@@ -36,7 +36,6 @@ use esp_hal::ledc::channel::ChannelHW;
 use esp_hal::timer::timg::{MwdtStage, TimerGroupInstance, Wdt};
 
 use crate::chassis::{Chassis, MotorDriver};
-use crate::control::ControlConfig;
 use crate::flash_log::{self, FlashLog};
 use crate::usb_gamepad::{GamepadHost, GamepadState};
 
@@ -95,7 +94,6 @@ impl<'d, D: UsbHostController<'d>> UsbSession<'d, D> {
     pub async fn run<S, M, TG>(
         &mut self,
         chassis: &mut Chassis<S, M>,
-        cfg: &ControlConfig,
         log: &mut FlashLog<'_>,
         wdt: &mut Wdt<TG>,
     ) -> !
@@ -203,7 +201,7 @@ impl<'d, D: UsbHostController<'d>> UsbSession<'d, D> {
                     log.record(flash_log::EV_SESSION, format_args!("direct reading"));
                     info!("iface0 ready — reading gamepad reports");
 
-                    run_control(&mut hid, chassis, cfg, log, wdt, "direct").await;
+                    run_control(&mut hid, chassis, log, wdt, "direct").await;
 
                     chassis.halt();
                     // The library requires the application to release the
@@ -215,7 +213,7 @@ impl<'d, D: UsbHostController<'d>> UsbSession<'d, D> {
                 Err(e) => {
                     log.record(flash_log::EV_IFACE, format_args!("no iface: {:?}", e));
                     info!("no direct gamepad — trying hub");
-                    run_hub(&self.bus, &enum_info, chassis, cfg, log, wdt).await;
+                    run_hub(&self.bus, &enum_info, chassis, log, wdt).await;
                 }
             }
         }
@@ -287,7 +285,6 @@ async fn run_hub<'d, A, S, M, TG>(
     bus: &BusHandle<'d, A>,
     hub_enum: &EnumerationInfo,
     chassis: &mut Chassis<S, M>,
-    cfg: &ControlConfig,
     log: &mut FlashLog<'_>,
     wdt: &mut Wdt<TG>,
 ) where
@@ -344,7 +341,7 @@ async fn run_hub<'d, A, S, M, TG>(
                         log.record(flash_log::EV_SESSION, format_args!("hub{} reading", port));
                         info!("iface0 ready on hub port {}", port);
 
-                        run_control(&mut hid, chassis, cfg, log, wdt, "hub").await;
+                        run_control(&mut hid, chassis, log, wdt, "hub").await;
 
                         chassis.halt();
                         bus.free_address(port_enum.device_address);
@@ -374,7 +371,6 @@ async fn run_hub<'d, A, S, M, TG>(
 async fn run_control<'d, A, S, M, TG>(
     hid: &mut GamepadHost<'d, A>,
     chassis: &mut Chassis<S, M>,
-    cfg: &ControlConfig,
     log: &mut FlashLog<'_>,
     wdt: &mut Wdt<TG>,
     label: &str,
@@ -438,13 +434,11 @@ async fn run_control<'d, A, S, M, TG>(
                 // been silent for the failsafe window — a lost link must not
                 // leave the car at its last throttle.
                 if chassis.failsafe_expired(Instant::now()) {
-                    error!(
-                        "{}: no reports for {} ms — stopping",
-                        label, cfg.failsafe_timeout_ms
-                    );
+                    let window_ms = chassis.failsafe_timeout_ms();
+                    error!("{}: no reports for {} ms — stopping", label, window_ms);
                     log.record(
                         flash_log::EV_STALE,
-                        format_args!("no reports {}ms", cfg.failsafe_timeout_ms),
+                        format_args!("no reports {}ms", window_ms),
                     );
                     break;
                 }
