@@ -98,6 +98,10 @@ const KICK_MIN_DEN: i32 = 10; // 30 %
 /// falling back to waiting for a fresh connection event.
 const ENUM_ATTEMPTS: u8 = 3;
 
+/// How long to wait for a device after one was already seen, before resetting
+/// the chip to rebuild the USB host stack (see the main loop).
+const RECONNECT_TIMEOUT_MS: u64 = 5000;
+
 /// One-shot start-kick state, timed in physical time.
 struct StartKick {
     /// Deadline of the active burst; `None` when no burst is running.
@@ -326,8 +330,37 @@ async fn main(_spawner: Spawner) -> ! {
     static BUS_STATE: BusState = BusState::new();
     let (mut bus_ctrl, bus) = embassy_usb_host::bus(Driver::new(usb), &BUS_STATE);
 
+    // Set once a device has been seen: from then on, losing it and not
+    // getting it back is treated as a wedged USB host.
+    let mut had_session = false;
     loop {
-        let speed = bus_ctrl.wait_for_connection().await;
+        let speed = if had_session {
+            // After a device is removed the root port is not always re-armed
+            // for a re-attach (observed: no further connect events), and the
+            // hub path can wait on its event queue forever too. A chip reset
+            // rebuilds the whole USB host stack, so it is the only reliable
+            // way back without a physical replug. Guarded by `had_session` so
+            // a car booted with nothing plugged in waits instead of
+            // reboot-looping.
+            match embassy_time::with_timeout(
+                Duration::from_millis(RECONNECT_TIMEOUT_MS),
+                bus_ctrl.wait_for_connection(),
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(_) => {
+                    error!(
+                        "no device for {} ms after a loss — resetting to recover USB",
+                        RECONNECT_TIMEOUT_MS
+                    );
+                    esp_hal::system::software_reset()
+                }
+            }
+        } else {
+            bus_ctrl.wait_for_connection().await
+        };
+        had_session = true;
         info!("Device connected at {:?}", speed);
 
         // Let the device finish its own power-up before the first control
@@ -432,6 +465,9 @@ async fn main(_spawner: Spawner) -> ! {
                             }
                         }
                         stop(&mut steering, &mut motors, &mut motor_slew, &mut kick);
+                        // The library requires the application to release the
+                        // device address once the device is gone.
+                        bus.state().free_address(enum_info.device_address);
                         info!("Device disconnected, waiting for next");
                     }
                     Err(_) => {
@@ -555,6 +591,8 @@ async fn main(_spawner: Spawner) -> ! {
                                                                 &mut motor_slew,
                                                                 &mut kick,
                                                             );
+                                                            bus.state()
+                                                                .free_address(ei.device_address);
                                                             info!(
                                                                 "Device on hub port {} gone",
                                                                 port
