@@ -45,6 +45,7 @@ use esp_hal::time::Rate;
 use esp_hal::usb::otg::{Usb, embassy_usb_host::Driver};
 
 use jocar_steer::control;
+use jocar_steer::flash_log;
 use jocar_steer::steering::Steering;
 use jocar_steer::tb6612::Tb6612Single;
 use jocar_steer::usb_gamepad::{GamepadHost, GamepadState};
@@ -245,6 +246,14 @@ async fn main(_spawner: Spawner) -> ! {
 
     info!("Embassy initialized!");
 
+    // ── Persistent event log (one unused flash sector) ────────────────
+    // Records what happened while the console could not be attached; see
+    // src/flash_log.rs. Created before the USB host starts so the flash access
+    // (cache and interrupts disabled) cannot disturb USB timing.
+    let mut log = flash_log::FlashLog::new(esp_storage::FlashStorage::new(peripherals.FLASH));
+    log.record(flash_log::EV_BOOT, format_args!("boot"));
+    log.dump();
+
     // ── Servo on GPIO14 via LEDC (50 Hz) ─────────────────────────────
     let mut ledc = Ledc::new(peripherals.LEDC);
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
@@ -354,14 +363,34 @@ async fn main(_spawner: Spawner) -> ! {
                         "no device for {} ms after a loss — resetting to recover USB",
                         RECONNECT_TIMEOUT_MS
                     );
+                    log.record(flash_log::EV_RESET, format_args!("usb lost"));
+                    // Replay the persisted log now: while the direct adapter
+                    // occupies the OTG port the console is unattached, so the
+                    // history is read after the user swaps the cable back.
+                    log.dump();
                     esp_hal::system::software_reset()
                 }
             }
         } else {
-            bus_ctrl.wait_for_connection().await
+            // No device has been seen yet. Wait indefinitely — a car booted
+            // with nothing attached must not reboot-loop — but keep replaying
+            // the persisted log every period so that attaching the console
+            // later still shows what a previous session recorded.
+            loop {
+                match embassy_time::with_timeout(
+                    Duration::from_millis(RECONNECT_TIMEOUT_MS),
+                    bus_ctrl.wait_for_connection(),
+                )
+                .await
+                {
+                    Ok(s) => break s,
+                    Err(_) => log.dump(),
+                }
+            }
         };
         had_session = true;
         info!("Device connected at {:?}", speed);
+        log.record(flash_log::EV_CONNECTED, format_args!("{:?}", speed));
 
         // Let the device finish its own power-up before the first control
         // transfer. A hub port inserts this delay implicitly; a direct
@@ -378,17 +407,34 @@ async fn main(_spawner: Spawner) -> ! {
         // the loop forever (seen as a stuck state on a flaky power rail).
         let mut enum_result: Result<_, ()> = Err(());
         for attempt in 1..=ENUM_ATTEMPTS {
-            enum_result = embassy_time::with_timeout(
+            let r = embassy_time::with_timeout(
                 Duration::from_secs(5),
                 bus.enumerate(BusRoute::Direct(speed), &mut config_buf),
             )
-            .await
-            .map_err(|_| ());
+            .await;
             // Retry on a timeout as well as on a transfer error (e.g. STALL).
-            if matches!(enum_result, Ok(Ok(_))) {
+            let succeeded = matches!(r, Ok(Ok(_)));
+            match &r {
+                Ok(Err(e)) => {
+                    error!("Enumeration attempt {} failed: {:?}", attempt, e);
+                    log.record(
+                        flash_log::EV_ENUM_FAIL,
+                        format_args!("{:?} try{}", e, attempt),
+                    );
+                }
+                Err(_) => {
+                    error!("Enumeration attempt {} timed out after 5s", attempt);
+                    log.record(
+                        flash_log::EV_ENUM_FAIL,
+                        format_args!("timeout try{}", attempt),
+                    );
+                }
+                Ok(Ok(_)) => {}
+            }
+            enum_result = r.map_err(|_| ());
+            if succeeded {
                 break;
             }
-            error!("Enumeration attempt {} failed", attempt);
             Timer::after(Duration::from_millis(200)).await;
         }
         let enum_result = match enum_result {
@@ -468,6 +514,7 @@ async fn main(_spawner: Spawner) -> ! {
                         // The library requires the application to release the
                         // device address once the device is gone.
                         bus.state().free_address(enum_info.device_address);
+                        log.record(flash_log::EV_LOST, format_args!("direct device gone"));
                         info!("Device disconnected, waiting for next");
                     }
                     Err(_) => {
@@ -593,6 +640,13 @@ async fn main(_spawner: Spawner) -> ! {
                                                             );
                                                             bus.state()
                                                                 .free_address(ei.device_address);
+                                                            log.record(
+                                                                flash_log::EV_LOST,
+                                                                format_args!(
+                                                                    "hub port {} gone",
+                                                                    port
+                                                                ),
+                                                            );
                                                             info!(
                                                                 "Device on hub port {} gone",
                                                                 port
