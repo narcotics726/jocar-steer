@@ -251,3 +251,25 @@ where
         self.pwm.set_duty_hw(0);
     }
 }
+
+impl<Ch> crate::chassis::MotorDriver for Tb6612Single<'_, Ch>
+where
+    Ch: ChannelHW,
+{
+    fn set_speed(&mut self, speed: i32) {
+        self.set_motor(speed);
+    }
+
+    /// Coast. A brushed driver's "no drive" is a zero command; the ESC
+    /// implementation of this trait does very different work (it must keep
+    /// pulsing neutral instead of going quiet).
+    fn stop(&mut self) {
+        self.coast();
+    }
+
+    /// STBY high. Redundant if [`Tb6612Single::new`] was followed by
+    /// [`Tb6612Single::enable`], but the trait must be self-contained.
+    fn enable(&mut self) {
+        Tb6612Single::enable(self);
+    }
+}

@@ -51,7 +51,6 @@ use esp_hal::{
 };
 use esp_println as _;
 use esp_storage::FlashStorage;
-use jocar_steer::lighting::ws2812_stat_indicator::Rgb;
 use jocar_steer::usb_gamepad::{GamepadHost, GamepadState};
 
 extern crate alloc;
@@ -314,6 +313,18 @@ fn set_input(c: InputClass) {
 }
 
 // ── WS2812 LED (GPIO48, RMT ch0 @ 80 MHz) ──────────────────────────
+
+/// RGB colour with WS2812 byte order (GRB — green sent first).
+#[derive(Clone, Copy, PartialEq, defmt::Format)]
+struct Rgb {
+    g: u8,
+    r: u8,
+    b: u8,
+}
+
+impl Rgb {
+    const OFF: Self = Self { g: 0, r: 0, b: 0 };
+}
 
 const CODE_0: PulseCode = PulseCode::new(Level::High, 32, Level::Low, 68);
 const CODE_1: PulseCode = PulseCode::new(Level::High, 64, Level::Low, 36);

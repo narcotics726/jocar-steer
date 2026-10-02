@@ -61,7 +61,6 @@ use esp_hal::{
 };
 use esp_println as _;
 use esp_storage::FlashStorage;
-use jocar_steer::lighting::ws2812_stat_indicator::Rgb;
 
 extern crate alloc;
 
@@ -273,6 +272,18 @@ const BITS_PER_LED: usize = 24;
 const MAX_LEDS: usize = 1;
 
 type WsBuf = [PulseCode; BITS_PER_LED * MAX_LEDS + 1];
+
+/// RGB colour with WS2812 byte order (GRB — green sent first).
+#[derive(Clone, Copy, PartialEq, defmt::Format)]
+struct Rgb {
+    g: u8,
+    r: u8,
+    b: u8,
+}
+
+impl Rgb {
+    const OFF: Self = Self { g: 0, r: 0, b: 0 };
+}
 
 fn encode_led(buf: &mut WsBuf, offset: usize, rgb: Rgb) {
     let bits = ((rgb.g as u32) << 16) | ((rgb.r as u32) << 8) | (rgb.b as u32);
