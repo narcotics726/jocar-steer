@@ -17,22 +17,39 @@ use embassy_time::{Duration, Instant};
 /// the [`MotorDriver`](crate::chassis::MotorDriver) implementation.
 #[derive(Clone, Copy)]
 pub struct ControlConfig {
-    /// Maximum steering deflection to the **left**, in degrees (a positive
-    /// command turns left — an empirical, per-car fact: it was verified through
-    /// the direction `center_trim_deg` moved the wheels, not derived).
+    /// Maximum steering deflection on the **positive** side, in degrees: the
+    /// longer servo pulse, which is the side [`crate::steering`] and the
+    /// `servo-test` sweeps label LEFT.
     ///
-    /// Separate from the right limit because steering linkages are not
+    /// Separate from the negative limit because steering linkages are not
     /// symmetric: the knuckle's own stops can differ by several degrees, and the
     /// only software lever is to cap each side separately. Measured on the
     /// 1/10 car: both ends sit 3–5° short of their stop at ±75° of servo travel,
     /// i.e. the asymmetry is in the stops, not in the servo's range.
     pub steer_max_left_deg: i32,
-    /// Maximum steering deflection to the **right**, in degrees (a negative
-    /// command turns right).
+    /// Maximum steering deflection on the **negative** side, in degrees (the
+    /// shorter pulse).
     ///
     /// Evening the two sides out by *reducing* this one is the safe direction;
     /// raising `steer_max_left_deg` eats that side's margin to its stop.
     pub steer_max_right_deg: i32,
+    /// Flip the sign of the stick→angle mapping: the composite of the receiver's
+    /// axis polarity and the car's steering mounting, which together decide
+    /// whether stick-left steers left (see [`rx_to_deg`] for why the two are
+    /// separable only with a bench check, not with the code).
+    ///
+    /// It came from a measurement, not from a convention: the 1/10 car sent the
+    /// wheels the wrong way on the default sign (stick left → wheels right). The
+    /// other car keeps the default — it has never been reported as reversed, and
+    /// this change must not silently flip a car that already drives; if it ever
+    /// turns out reversed too, it is this same flag. A standard analog servo has
+    /// no reverse bit, and re-fitting the horn 180° would move the mechanical
+    /// centre with it, so this is also the only place it can be fixed.
+    ///
+    /// It does **not** swap the two limits to the other stick end: they are
+    /// picked by the sign of the angle actually sent, so `steer_max_left_deg`
+    /// stays the longer-pulse side on both settings.
+    pub steer_invert: bool,
     /// Maximum motor speed, in abstract units (±`motor_max_speed`). The actuator
     /// maps them into its own domain — duty for a TB6612 channel, pulse width
     /// for an ESC.
@@ -108,14 +125,33 @@ pub fn ly_to_speed(ly: u8, deadzone: i32, max_speed: i32) -> i32 {
 
 /// Map right-stick X to a steering angle in degrees.
 ///
-/// `rx` range: 0 = full-left, 128 = centre, 255 = full-right.
-/// Same `/128` rationale as [`ly_to_speed`].
-pub fn rx_to_deg(rx: u8, deadzone: i32, max_deg: i32) -> i32 {
+/// `rx` rising (0 → 255) maps toward the **positive** angle — the longer pulse —
+/// and the magnitude is scaled by **that side's** limit, so full stick is exactly
+/// that side's cap. Scaling both sides by one of them (all a single symmetric
+/// limit could do) would have the smaller side reach its cap early and leave a
+/// dead band above it.
+///
+/// Which *stick* end that is, and which *physical* side it steers, are two facts
+/// this function cannot separate: the receiver's axis polarity (the notes in
+/// `ps2.rs` and the bins say 0 = stick left, and the control loop prints `rx=`
+/// every 100 ms, so it is checkable) times the car's steering mounting. Their
+/// product is what actually decides whether stick-left steers left, and it is
+/// per-car — [`ControlConfig::steer_invert`].
+pub fn rx_to_deg(rx: u8, cfg: &ControlConfig) -> i32 {
     let centered = rx as i32 - 128;
-    if centered.abs() <= deadzone {
+    if centered.abs() <= cfg.rx_deadzone {
         return 0;
     }
-    centered * max_deg / 128
+    // The per-car sign. Note it does not move the two limits to the other
+    // stick end: they are picked by the sign of the angle that is actually
+    // sent, so `steer_max_left_deg` is always the longer-pulse side.
+    let cmd = if cfg.steer_invert { -centered } else { centered };
+    let limit = if cmd > 0 {
+        cfg.steer_max_left_deg
+    } else {
+        cfg.steer_max_right_deg
+    };
+    cmd * limit / 128
 }
 
 /// Speed ceiling for a given steering angle: full `motor_max_speed` at centre,

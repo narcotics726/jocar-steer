@@ -13,12 +13,14 @@
 //! policy is [`crate::chassis`].
 //!
 //! Hardware / pin map:
-//! - **Steering servo** MG996R on **G14** (LEDC Timer0/Ch0, 50 Hz) — same pin on
-//!   both cars, so a harness built for the other one carries it over unchanged
-//! - **ESC throttle** on **G13** (LEDC Timer2/Ch1) — **temporarily borrowed from
-//!   the other car's PWMA pin** so its adapter harness works as-is; the design
-//!   pin is G1/Timer0-Ch1 (plan §3.6). See the swap note in `main` before
-//!   moving it back, and never flash the other bin while the ESC is on this pin.
+//! - **Steering servo** MG996R on **G10** (LEDC Timer0/Ch0, 50 Hz)
+//! - **ESC throttle** on **G9** (LEDC Timer0/Ch1 — the two outputs share one
+//!   50 Hz timer, as the plan §3.6 designs it). Both are plain GPIOs outside the
+//!   strapping group (0/3/45/46) and the flash/PSRAM group (26–37). Note G10 is
+//!   also the *other* car's TB6612 STBY: if both harnesses are ever wired to the
+//!   same board at once, the two bins disagree about that pin (a 50 Hz pulse vs
+//!   a static level). Nothing is damaged by it — a constant level is "no valid
+//!   pulse" to a servo — but only one car can own the pin at a time.
 //! - **Receiver** on the native OTG port, G19 (D-) / G20 (D+)
 //! - Power: 2S → buck A (≥3 A) → servo, buck B → board 5VIN, and 2S direct to
 //!   the ESC. **The ESC's BEC stays disconnected** (see the plan §3.5 for the
@@ -134,8 +136,12 @@ async fn main(_spawner: Spawner) -> ! {
     // ── Control-phase watchdog (TIMG1 is otherwise idle) ──────────────
     let mut wdt = TimerGroup::new(peripherals.TIMG1).wdt;
 
-    // ── 50 Hz RC outputs ─────────────────────────────────────────────
-    // Timer0/Ch0 → G14: the steering servo (same pin as the other car).
+    // ── 50 Hz RC outputs (one timer, two channels) ───────────────────
+    // Timer0/Ch0 → G10: the steering servo. Timer0/Ch1 → G9: the ESC throttle.
+    // Both are 50 Hz from the shared RC-pulse module, so they share the timer;
+    // `Channel::configure` only touches its own channel (a channel holds a
+    // reference to the timer, it does not reconfigure it), so the order does not
+    // matter as long as the timer is configured first.
     let mut ledc = Ledc::new(peripherals.LEDC);
     rc_pwm::init(&mut ledc);
 
@@ -144,7 +150,7 @@ async fn main(_spawner: Spawner) -> ! {
     // timer config and the drivers' pulse→counts conversion cannot disagree.
     lstimer.configure(rc_pwm::timer_config()).unwrap();
 
-    let mut servo_ch = ledc.channel(channel::Number::Channel0, peripherals.GPIO14);
+    let mut servo_ch = ledc.channel(channel::Number::Channel0, peripherals.GPIO10);
     servo_ch
         .configure(channel::config::Config {
             timer: &lstimer,
@@ -153,29 +159,10 @@ async fn main(_spawner: Spawner) -> ! {
         })
         .unwrap();
 
-    // Timer2/Ch1 → G13: the ESC throttle.
-    //
-    // **TEMPORARY PIN.** The design pin is G1 (plan §3.6) on Timer0/Ch1, which
-    // keeps this output off the other car's PWMA pin so both harnesses can be
-    // wired at once. G13 is that PWMA pin, borrowed here because the adapter
-    // harness was built for the other car. Moving back is: this pin back to
-    // `peripherals.GPIO1`, this channel back to Timer0 (Ch1), and its timer left
-    // as-is when the two outputs share one timer again.
-    //
-    // Timer2/Ch1 is the one LEDC combination on this board known to drive PWMA
-    // (Timer1 and Channel2 were found to produce no output). Note the same
-    // physical pin carries a completely different signal depending on which bin
-    // is flashed: a 50 Hz RC pulse here, a 10 kHz duty-cycle motor PWM in the
-    // other car's firmware. So while the ESC is on G13, flash with
-    // `cargo run --bin rc10` — a bare `cargo run` puts the other bin's 10 kHz
-    // signal on this line.
-    let mut esc_timer = ledc.timer::<LowSpeed>(timer::Number::Timer2);
-    esc_timer.configure(rc_pwm::timer_config()).unwrap();
-
-    let mut esc_ch = ledc.channel(channel::Number::Channel1, peripherals.GPIO13);
+    let mut esc_ch = ledc.channel(channel::Number::Channel1, peripherals.GPIO9);
     esc_ch
         .configure(channel::config::Config {
-            timer: &esc_timer,
+            timer: &lstimer,
             duty_pct: 0, // `Esc::new` writes neutral immediately after this
             drive_mode: DriveMode::PushPull,
         })
@@ -213,10 +200,12 @@ async fn main(_spawner: Spawner) -> ! {
         // Steering limits are *per side* because this linkage is not symmetric:
         // measured with `servo-test` H, at ±75° of servo travel *both* ends are
         // still 3–5° short of their mechanical stop and nothing buzzes, i.e. the
-        // asymmetry lives in the knuckle stops, not in the servo's range. The
-        // wheels turn further to the right, so the right limit is the one pulled
-        // in — reducing the larger side is the safe direction, raising the
-        // smaller one eats its margin.
+        // asymmetry lives in the knuckle stops, not in the servo's range. One
+        // side turns further, so that side is the one pulled in — reducing the
+        // larger side is the safe direction, raising the smaller one eats its
+        // margin. (Which side that is, in wheel terms, is what `servo-test` I
+        // settles; its RIGHT/LEFT labels are the short/long pulse, the same
+        // sides these two fields name.)
         // Left 72 with the +2° trim sends 1911 µs — inside the tested 1084…1916 µs
         // band, and that band's upper end is why the left cannot go higher: +75°
         // would be 1927 µs, past anything verified.
@@ -225,6 +214,13 @@ async fn main(_spawner: Spawner) -> ! {
         // sooner, i.e. more responsive mid-stick.
         steer_max_left_deg: 72,
         steer_max_right_deg: 68,
+        // Bench-measured on this car: stick left turned the wheels right, so the
+        // shared default sign is the wrong one *here*. The other car keeps the
+        // default (never reported reversed) — same policy, opposite answer, so the
+        // sign is a per-car fact. The two limits above are picked by the sign of
+        // the angle actually sent (long pulse = "left"), not by stick end, so they
+        // keep capping the same pulse directions on either setting of this flag.
+        steer_invert: true,
         motor_max_speed: MOTOR_MAX_SPEED,
         // Un-calibrated first value, carried over from the other car. The ESC
         // is the actuator with its own soft start, so the slew here is about
@@ -274,14 +270,14 @@ async fn main(_spawner: Spawner) -> ! {
         cfg.steer_max_left_deg.max(cfg.steer_max_right_deg),
     );
     info!(
-        "Steering: offset={}°  limits L{}/R{}°  right stick → steer (G14)",
-        CENTER_TRIM_DEG, cfg.steer_max_left_deg, cfg.steer_max_right_deg
+        "Steering: offset={}°  limits L{}/R{}°  invert={} (G10)",
+        CENTER_TRIM_DEG, cfg.steer_max_left_deg, cfg.steer_max_right_deg, cfg.steer_invert
     );
 
     // Construction starts the neutral pulse train (the ESC's arming signal).
     let esc = Esc::new(esc_ch, esc_cfg);
     info!(
-        "ESC on G13 (temp pin): neutral={}µs fwd={}µs rev={}µs deadzone={} arm={}ms",
+        "ESC on G9: neutral={}µs fwd={}µs rev={}µs deadzone={} arm={}ms",
         esc_cfg.neutral_us,
         esc_cfg.forward_span_us,
         esc_cfg.reverse_span_us,

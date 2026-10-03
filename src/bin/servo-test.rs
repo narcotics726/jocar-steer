@@ -10,13 +10,12 @@
 //! unattended with the wheels down.
 //!
 //! Pins (both on LEDC Timer0, 50 Hz):
-//! - **G14** — steering servo channel (Timer0/Ch0)
-//! - **G1** — ESC throttle channel (Timer0/Ch1)
+//! - **G10** — steering servo channel (Timer0/Ch0)
+//! - **G9** — ESC throttle channel (Timer0/Ch1)
 //!
-//! ⚠ **The throttle pin is currently moved to G13** (LEDC Timer2/Ch1), the other
-//! car's PWMA pin, because the adapter harness routes it there — see the swap
-//! note at the LEDC setup in `main`. It has to match `rc10.rs` or this tool
-//! drives a pin with nothing on it.
+//! These must match `rc10.rs` or the tool drives a pin with nothing on it and the
+//! device looks dead. Two files, one pin map — the coupling is real, and it is
+//! why the map is stated in both headers.
 //!
 //! Only the device being calibrated needs to be connected. Until its own section
 //! starts, the other channel emits **nothing** (duty 0), which is not the same as
@@ -32,14 +31,14 @@
 //!
 //! # What it does, and the criterion for each section
 //!
-//! **A. Servo sweep (G14)** — 1500 → 1000 → 2000 → 1500 µs in 50 µs steps, each
+//! **A. Servo sweep (G10)** — 1500 → 1000 → 2000 → 1500 µs in 50 µs steps, each
 //! step printed and held 400 ms, with only half a second at each end.
 //! *Criterion:* where does the horn reach the mechanical stop (buzzing = too
 //! far), and is 1500 µs really "wheels straight"? → `CENTER_TRIM_DEG` and
 //! `steer_max_left_deg` / `steer_max_right_deg` in the bin. Do not let it sit at a stop: a stalled servo is
 //! the one thing the local capacitor cannot save (plan §3.5).
 //!
-//! **B. ESC arm, then cold-start reverse, then forward probe (G1)** — neutral for
+//! **B. ESC arm, then cold-start reverse, then forward probe (G9)** — neutral for
 //! 5 s (the arm hold), then *straight to reverse* for 1.5 s, then
 //! 1550/1600/1650/1700/1800 µs forward for 1 s each with 2 s of neutral in between.
 //! *Criterion:* does reverse engage **without any preceding forward command**?
@@ -49,7 +48,7 @@
 //! Then: the smallest pulse that reliably turns the wheels, and which way →
 //! `neutral_us`, `forward_span_us`.
 //!
-//! **E. Reverse-protocol probe (G1)** — three patterns, one per candidate
+//! **E. Reverse-protocol probe (G9)** — three patterns, one per candidate
 //! protocol: a deep pulse straight from neutral; forward → neutral → deep pulse;
 //! and forward → first-sub-neutral-pulse (brake) → neutral → sub-neutral again.
 //! *Criterion:* which pattern produces reverse at all, plus two readouts the code
@@ -59,7 +58,7 @@
 //! under either of the first two patterns, and in that state a dwell sweep
 //! measures nothing.
 //!
-//! **C. Reverse-latch dwell sweep (G1)** — forward 1650 µs (2 s) → neutral for T
+//! **C. Reverse-latch dwell sweep (G9)** — forward 1650 µs (2 s) → neutral for T
 //! → reverse (1.5 s) → neutral (2 s), for T = 100…400 ms and for **two** reverse
 //! magnitudes (1400 and 1200 µs).
 //! *Criterion:* the smallest T at which reverse engages. Two magnitudes because
@@ -154,7 +153,7 @@ async fn hold<C: ChannelHW>(ch: &mut C, pulse_us: u32, ms: u64, what: &str) {
     (no USB stack, no control loop) so it has the stack to itself"
 )]
 async fn servo_sweep<C: ChannelHW>(ch: &mut C) {
-    info!("A. servo sweep on G14 — watch for the mechanical stop (buzzing = too far)");
+    info!("A. servo sweep on G10 — watch for the mechanical stop (buzzing = too far)");
     hold(ch, NEUTRAL_US, 1500, "centre: are the wheels straight?").await;
 
     let mut us = NEUTRAL_US;
@@ -180,7 +179,7 @@ async fn servo_sweep<C: ChannelHW>(ch: &mut C) {
     reason = "same per-step console formatting as the servo sweep"
 )]
 async fn esc_arm_and_probe<C: ChannelHW>(esc: &mut C) {
-    info!("B. ESC on G1 — arming hold first, then cold-start reverse, then forward");
+    info!("B. ESC on G9 — arming hold first, then cold-start reverse, then forward");
     hold(esc, NEUTRAL_US, 5000, "neutral: the ESC arms here (it should beep)").await;
 
     // The plan's prediction, tested before any forward demand exists.
@@ -205,7 +204,7 @@ async fn esc_arm_and_probe<C: ChannelHW>(esc: &mut C) {
     reason = "same per-step console formatting as the servo sweep"
 )]
 async fn reverse_protocol_probe<C: ChannelHW>(esc: &mut C) {
-    info!("E. reverse protocol on G1 — for every pulse below neutral, watch the ESC LED");
+    info!("E. reverse protocol on G9 — for every pulse below neutral, watch the ESC LED");
     info!("   and try turning the wheels by hand: braked = the ESC IS driving (a brake),");
     info!("   free = it reads neutral, turning backwards = reverse.");
 
@@ -251,7 +250,7 @@ async fn reverse_protocol_probe<C: ChannelHW>(esc: &mut C) {
     reason = "same per-step console formatting as the servo sweep"
 )]
 async fn reverse_recipe_probe<C: ChannelHW>(esc: &mut C) {
-    info!("F. reverse recipe on G1 — note WHICH of these reverses; any motion counts");
+    info!("F. reverse recipe on G9 — note WHICH of these reverses; any motion counts");
 
     // F2 first: if the brake pulse turns out to be unnecessary, the firmware
     // needs no three-phase state machine at all — only a longer neutral window.
@@ -348,8 +347,9 @@ async fn gate_minimum_sweep<C: ChannelHW>(esc: &mut C) {
     reason = "same per-step console formatting as the servo sweep"
 )]
 async fn steering_travel_map<C: ChannelHW>(ch: &mut C) {
-    info!("H. steering travel mapping on G14 — at each step note (a) how far the");
-    info!("   wheels turned and (b) whether the servo buzzes (that is a stop).");
+    info!("H. steering travel mapping on G10 — positive angle = LEFT (longer pulse,");
+    info!("   the side `steer_max_left_deg` names); negative = RIGHT. At each step note");
+    info!("   (a) how far the wheels turned and (b) whether the servo buzzes (a stop).");
 
     for deg in [0i32, 15, -15, 30, -30, 45, -45, 60, -60, 75, -75] {
         let pulse = (NEUTRAL_US as i32 + deg * 500 / 90) as u32;
@@ -373,12 +373,21 @@ async fn steering_travel_map<C: ChannelHW>(ch: &mut C) {
 /// end of the band verified with H is what caps it, and reducing the right never
 /// eats a margin. Labels are the firmware's servo angles *without* the bin's
 /// +2° trim — a common shift, so the comparison is unaffected.
+///
+/// Two things are being asked, and the direction part is free. The labels are the
+/// two pulse directions the firmware itself uses (long = the side
+/// `steer_max_left_deg` caps), so the steps are also a direction check: at the
+/// "LEFT" (long-pulse) step the wheels must point the way that side is supposed
+/// to steer. If they point the other way, the sign flag in `rc10.rs` is still
+/// wrong — and if the two ends differ in *how far* they turn, the step whose
+/// right angle matches that left one is the pair to keep.
 #[allow(
     clippy::large_stack_frames,
     reason = "same per-step console formatting as the servo sweep"
 )]
 async fn steering_symmetry<C: ChannelHW>(ch: &mut C) {
-    info!("I. steering symmetry on G14 — pick the pair whose two ends look equal");
+    info!("I. steering symmetry on G10 — at each step note (a) which way the wheels");
+    info!("   point at RIGHT and at LEFT, (b) whether the two look equally far.");
     const LEFT_DEG: i32 = 72;
 
     for right in [70i32, 68, 64, 60, 54, 48] {
@@ -388,8 +397,8 @@ async fn steering_symmetry<C: ChannelHW>(ch: &mut C) {
             "  === I: RIGHT {}° ({} µs), then LEFT {}° ({} µs) ===",
             right, right_pulse, LEFT_DEG, left_pulse
         );
-        hold(ch, right_pulse, 2500, "RIGHT — note the wheel angle").await;
-        hold(ch, left_pulse, 2500, "LEFT — the same every step, the reference").await;
+        hold(ch, right_pulse, 2500, "RIGHT: short pulse, the steer_max_right_deg side").await;
+        hold(ch, left_pulse, 2500, "LEFT: long pulse, same every step, the reference").await;
         hold(ch, NEUTRAL_US, 800, "centre").await;
     }
     info!("I done — the right value whose angle matches that left one wins.");
@@ -404,7 +413,7 @@ async fn steering_symmetry<C: ChannelHW>(ch: &mut C) {
     reason = "same per-step console formatting as the servo sweep"
 )]
 async fn reverse_dwell_sweep<C: ChannelHW>(esc: &mut C) {
-    info!("C. reverse latch on G1 — forward → neutral(T) → reverse, two magnitudes");
+    info!("C. reverse latch on G9 — forward → neutral(T) → reverse, two magnitudes");
     for reverse_us in [1400u32, 1200] {
         info!(
             "== reverse pulse {} µs (a too-small pulse looks the same as a held latch)",
@@ -464,7 +473,7 @@ async fn main(_spawner: Spawner) -> ! {
     let mut lstimer = ledc.timer::<LowSpeed>(timer::Number::Timer0);
     lstimer.configure(rc_pwm::timer_config()).unwrap();
 
-    let mut servo_ch = ledc.channel(channel::Number::Channel0, peripherals.GPIO14);
+    let mut servo_ch = ledc.channel(channel::Number::Channel0, peripherals.GPIO10);
     servo_ch
         .configure(channel::config::Config {
             timer: &lstimer,
@@ -473,26 +482,19 @@ async fn main(_spawner: Spawner) -> ! {
         })
         .unwrap();
 
-    // Timer2/Ch1 → G13: the ESC throttle.
-    //
-    // **TEMPORARY PIN — must match `rc10.rs`.** The firmware's design pin is G1
-    // on Timer0/Ch1; G13 is the other car's PWMA pin, borrowed while its adapter
-    // harness is in use. If these two disagree the tool drives a pin with nothing
-    // on it and the throttle side looks dead. Moving back means changing this
-    // pin, this channel back to Timer0/Ch1, and `rc10.rs` with it.
-    let mut esc_timer = ledc.timer::<LowSpeed>(timer::Number::Timer2);
-    esc_timer.configure(rc_pwm::timer_config()).unwrap();
-
-    let mut esc_ch = ledc.channel(channel::Number::Channel1, peripherals.GPIO13);
+    // Timer0/Ch1 → G9: the ESC throttle, sharing the servo's 50 Hz timer (the
+    // same layout `rc10.rs` uses; `Channel::configure` touches only its own
+    // channel).
+    let mut esc_ch = ledc.channel(channel::Number::Channel1, peripherals.GPIO9);
     esc_ch
         .configure(channel::config::Config {
-            timer: &esc_timer,
+            timer: &lstimer,
             duty_pct: 0,
             drive_mode: DriveMode::PushPull,
         })
         .unwrap();
 
-    info!("LEDC ready: 50 Hz — Ch0/Timer0 → G14 (servo), Ch1/Timer2 → G13 (ESC, temporary)");
+    info!("LEDC ready: 50 Hz — Ch0/Timer0 → G10 (servo), Ch1/Timer0 → G9 (ESC)");
     info!("WHEELS OFF THE GROUND. Starting in 3 s.");
     Timer::after(Duration::from_millis(3000)).await;
 

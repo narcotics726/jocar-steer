@@ -172,6 +172,10 @@ async fn main(_spawner: Spawner) -> ! {
         // wheels scrub so hard (no rear diff) the motor stalls.
         steer_max_left_deg: 30,
         steer_max_right_deg: 30,
+        // Not flipped: this car's linkage has always been driven with the
+        // default sign. It is the one flag to change if a car steers mirrored
+        // (check with the wheels off the ground: stick left → wheels left).
+        steer_invert: false,
         // Full speed is safe: the N30 is 12 V-rated and the battery is 2S
         // (7.4 V), so we are under-voltage, not over. The motor heats from
         // stall current during turns, which the steer-throttle mix mitigates.

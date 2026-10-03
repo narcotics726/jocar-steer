@@ -81,14 +81,11 @@ where
         };
         self.last_report = Some(now);
 
-        let steer = control::rx_to_deg(steer_axis, self.cfg.rx_deadzone, self.cfg.steer_max_left_deg)
-            // Per-side cap: the linkage is not symmetric, and `Steering`'s own
-            // clamp is a single symmetric safety ceiling (it gets the larger of
-            // the two), so the asymmetry is applied here.
-            .clamp(
-                -self.cfg.steer_max_right_deg,
-                self.cfg.steer_max_left_deg,
-            );
+        // The per-side cap is applied inside `rx_to_deg` (it scales by that
+        // side's own limit), so the value already sits within
+        // `[-steer_max_right_deg, steer_max_left_deg]` — `Steering`'s own clamp
+        // is the single symmetric safety ceiling and gets the larger of the two.
+        let steer = control::rx_to_deg(steer_axis, &self.cfg);
         self.steering.set_target(steer);
         self.steering.update(self.cfg.steer_slew_rate_deg_s, dt_us);
 
